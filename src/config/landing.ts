@@ -1,7 +1,23 @@
 import type { LandingConfig } from "@/types/landing";
 
+export const siteConfig = {
+  title: "TradeShala — Trade Smarter, Risk Nothing",
+  description:
+    "India's #1 paper trading platform. Practice trading with ₹10 Lakh virtual cash using real-time NSE/BSE data. 100% free and risk-free.",
+  keywords:
+    "paper trading, virtual trading, stock market practice, NSE, BSE, India trading app, learn trading",
+  author: "TradeShala",
+} as const;
+
 export const landingConfig: LandingConfig = {
   appName: "TradeShala",
+  // logo: {
+  //   src: "/logo.svg",
+  //   alt: "TradeShala Logo",
+  //   width: 120,
+  //   height: 50,
+  // },
+  scrollToTopLabel: "Back to top",
   tagline: "Your virtual paper trading playground",
   description:
     "Master the art of trading without risking real money. Practice with virtual funds, learn strategies, and build confidence before entering the real market.",
@@ -9,7 +25,7 @@ export const landingConfig: LandingConfig = {
   navLinks: [
     { label: "Features", href: "#features" },
     { label: "How It Works", href: "#how-it-works" },
-    { label: "Testimonials", href: "#testimonials" },
+    // { label: "Testimonials", href: "#testimonials" },
   ],
 
   hero: {
@@ -18,7 +34,7 @@ export const landingConfig: LandingConfig = {
     subheadline:
       "Practice trading with virtual ₹10,00,000. Learn strategies, track performance, and build confidence — all without risking a single rupee.",
     ctaButtons: [
-      { label: "Start Trading Free", href: "#", variant: "primary" },
+      { label: "Start Trading Free", href: "/login", variant: "primary" },
       { label: "Learn More", href: "#features", variant: "secondary" },
     ],
     badges: [
@@ -124,7 +140,7 @@ export const landingConfig: LandingConfig = {
     subheadline:
       "Join thousands of traders who are learning and growing with TradeShala. It's completely free.",
     buttonText: "Create Free Account",
-    buttonHref: "#",
+    buttonHref: "/signup",
   },
 
   footer: {

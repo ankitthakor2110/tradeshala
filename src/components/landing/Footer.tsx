@@ -13,7 +13,7 @@ export default function Footer({ appName, footer }: FooterProps) {
         <div className="grid md:grid-cols-4 gap-8">
           <div>
             <div className="text-xl font-bold text-green-400 mb-3">
-              {appName} 📈
+              <span className="text-white">Trade</span><span className="text-green-400">Shala</span>
             </div>
             <p className="text-gray-400 text-sm leading-relaxed">
               {footer.description}
@@ -27,7 +27,7 @@ export default function Footer({ appName, footer }: FooterProps) {
                   <li key={link.label}>
                     <Link
                       href={link.href}
-                      className="text-gray-400 hover:text-white text-sm transition-colors"
+                      className="text-gray-400 hover:text-green-400 hover:underline underline-offset-4 text-sm cursor-pointer transition-colors duration-200"
                     >
                       {link.label}
                     </Link>

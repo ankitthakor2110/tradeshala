@@ -64,8 +64,17 @@ export interface FooterConfig {
   copyright: string;
 }
 
+export interface LogoConfig {
+  src: string;
+  alt: string;
+  width: number;
+  height: number;
+}
+
 export interface LandingConfig {
   appName: string;
+  // logo: LogoConfig;
+  scrollToTopLabel: string;
   tagline: string;
   description: string;
   navLinks: NavLink[];
