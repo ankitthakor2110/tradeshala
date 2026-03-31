@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import FormInput from "@/components/ui/FormInput";
 import Modal from "@/components/ui/Modal";
 import TermsContent from "@/components/legal/TermsContent";
@@ -12,10 +13,12 @@ import {
   validatePassword,
   validateFullName,
 } from "@/utils/validation";
+import { signUp } from "@/services/auth.service";
 import type { SignupFormData } from "@/types/auth";
 
 export default function SignupPage() {
-  const { signup, errors } = authConfig;
+  const { signup, errors, loading } = authConfig;
+  const router = useRouter();
 
   const [form, setForm] = useState<SignupFormData>({
     fullName: "",
@@ -35,6 +38,8 @@ export default function SignupPage() {
 
   const [isTermsOpen, setIsTermsOpen] = useState(false);
   const [isPrivacyOpen, setIsPrivacyOpen] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   function updateField<K extends keyof SignupFormData>(
     key: K,
@@ -42,9 +47,10 @@ export default function SignupPage() {
   ) {
     setForm((prev) => ({ ...prev, [key]: value }));
     setFieldErrors((prev) => ({ ...prev, [key]: null }));
+    setFormError(null);
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
     const nameResult = validateFullName(form.fullName);
@@ -72,9 +78,21 @@ export default function SignupPage() {
 
     setFieldErrors(newErrors);
 
-    const hasErrors = Object.values(newErrors).some((err) => err !== null);
-    if (!hasErrors) {
-      // TODO: handle signup
+    const hasValidationErrors = Object.values(newErrors).some(
+      (err) => err !== null
+    );
+    if (hasValidationErrors) return;
+
+    setIsLoading(true);
+    setFormError(null);
+
+    const result = await signUp(form.email, form.password, form.fullName);
+
+    if (result.success) {
+      router.push("/login?signup=success");
+    } else {
+      setFormError(result.error ?? errors.signupFailed);
+      setIsLoading(false);
     }
   }
 
@@ -96,6 +114,12 @@ export default function SignupPage() {
         </div>
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-8">
+          {formError && (
+            <div className="mb-5 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-400">
+              {formError}
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-5">
             <FormInput
               label={signup.fullNameLabel}
@@ -170,10 +194,10 @@ export default function SignupPage() {
 
             <button
               type="submit"
-              disabled={hasErrors}
+              disabled={hasErrors || isLoading}
               className="w-full bg-green-500 hover:bg-green-400 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-green-500/25 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none text-white py-3 rounded-lg font-semibold cursor-pointer transition-all duration-200 active:scale-95"
             >
-              {signup.submitButton}
+              {isLoading ? loading.creatingAccount : signup.submitButton}
             </button>
           </form>
         </div>

@@ -61,5 +61,18 @@ export const authConfig = {
     confirmPasswordRequired: "Please confirm your password.",
     confirmPasswordMismatch: "Passwords do not match.",
     agreeToTermsRequired: "You must agree to the Terms & Conditions.",
+    loginFailed: "Invalid email or password. Please try again.",
+    signupFailed: "Could not create account. Please try again.",
+    genericError: "Something went wrong. Please try again.",
+  },
+
+  loading: {
+    signingIn: "Signing In...",
+    creatingAccount: "Creating Account...",
+  },
+
+  success: {
+    signupComplete:
+      "Account created successfully! Please check your email to verify, then sign in.",
   },
 } as const;

@@ -12,7 +12,7 @@ import ScrollToTop from "@/components/ui/ScrollToTop";
 export default function Home() {
   return (
     <main className="min-h-screen bg-gray-950 text-white">
-      <Navbar links={landingConfig.navLinks} />
+      <Navbar appName={landingConfig.appName} links={landingConfig.navLinks} />
       <HeroSection hero={landingConfig.hero} />
       <StatsSection stats={landingConfig.stats} />
       <FeaturesSection features={landingConfig.features} />
