@@ -1,6 +1,6 @@
 # TradeShala — Project Progress Summary
 
-## Project Overview
+## 📋 Project Overview
 
 - **Project Name:** TradeShala
 - **Description:** India's #1 virtual paper trading platform. Practice trading with virtual funds using real-time NSE/BSE data. 100% free and risk-free.
@@ -9,7 +9,7 @@
 - **Deployment:** Vercel (auto-deploy from `main` branch)
 - **Package Manager:** npm
 
-## Project Structure
+## 🏗️ Project Structure
 
 ```
 src/
@@ -103,7 +103,7 @@ src/
 | `types/` | TypeScript interfaces organized by domain |
 | `utils/` | Pure utility/helper functions |
 
-## Completed Features
+## ✅ Completed Features
 
 ### 1. Project Setup
 
@@ -200,6 +200,32 @@ src/
 - `/portfolio`
 - `/trades`
 - `/watchlist`
+
+**RLS (Row Level Security) policies (configured in Supabase Dashboard):**
+
+| Table | Policy | Rule |
+|-------|--------|------|
+| `profiles` | Users can read own profile | `SELECT` where `auth.uid() = id` |
+| `profiles` | Users can update own profile | `UPDATE` where `auth.uid() = id` |
+| `portfolios` | Users can read own holdings | `SELECT` where `auth.uid() = user_id` |
+| `portfolios` | Users can insert own holdings | `INSERT` with check `auth.uid() = user_id` |
+| `portfolios` | Users can update own holdings | `UPDATE` where `auth.uid() = user_id` |
+| `portfolios` | Users can delete own holdings | `DELETE` where `auth.uid() = user_id` |
+| `trades` | Users can read own trades | `SELECT` where `auth.uid() = user_id` |
+| `trades` | Users can insert own trades | `INSERT` with check `auth.uid() = user_id` |
+| `watchlist` | Users can read own watchlist | `SELECT` where `auth.uid() = user_id` |
+| `watchlist` | Users can insert to own watchlist | `INSERT` with check `auth.uid() = user_id` |
+| `watchlist` | Users can delete from own watchlist | `DELETE` where `auth.uid() = user_id` |
+
+> All tables have RLS enabled. Every policy scopes data to the authenticated user via `auth.uid()`.
+
+**Auth trigger (configured in Supabase Dashboard):**
+- **`on_auth_user_created`** — a PostgreSQL trigger function that fires after a new user signs up via Supabase Auth. It automatically creates a row in the `profiles` table with:
+  - `id` = the new user's `auth.uid()`
+  - `email` = the user's email from auth metadata
+  - `full_name` = extracted from `raw_user_meta_data->>'full_name'` (passed during `signUp()` in `auth.service.ts`)
+  - `virtual_balance` = `1000000` (default starting balance of ₹10,00,000)
+  - `created_at` / `updated_at` = `now()`
 
 **Services created:**
 - `auth.service.ts` — `signUp`, `signIn`, `signOut`, `getCurrentUser`, `sendPasswordReset`, `resetPassword`
@@ -339,9 +365,10 @@ src/
 - **Environment variables:** Must be set in Vercel project settings (see Environment Variables section below)
 - **Previous fix:** Resolved Vercel internal server error (commit `24b9365`)
 
-## Git Commit History
+## 🔄 Git Commit History
 
 ```
+0468ab4 Docs: Add project progress summary and auth-aware BrandLogo
 24b9365 Fix: Resolve Vercel internal server error
 3b9c7d1 Connected to supabase
 71f11fd Fixed navbar
@@ -351,7 +378,7 @@ src/
 1dcd869 Initial commit from Create Next App
 ```
 
-## Known Issues / Tech Debt
+## ⚠️ Known Issues / Tech Debt
 
 - **TestimonialsSection commented out** — the component is built (`src/components/landing/TestimonialsSection.tsx`) but commented out in `src/app/page.tsx` (lines 7 and 20)
 - **Dashboard uses mock data** — market indices, gainers/losers, and portfolio stats are hardcoded in `src/config/dashboard.ts`; `getPortfolioStats` falls back to mock data if Supabase query fails
@@ -361,7 +388,7 @@ src/
 - **`proxy.ts` naming** — Next.js middleware is exported from `src/proxy.ts` (function named `proxy` instead of the conventional `middleware`)
 - **Logo config commented out** — `landingConfig` has `logo` property commented out, using text-based brand rendering instead
 
-## Pending Features
+## 🚀 Pending Features
 
 - **Portfolio page** (`/dashboard/portfolio`) — empty, no page component exists
 - **Trades page** (`/dashboard/trades`) — empty, no page component exists
@@ -375,7 +402,7 @@ src/
 - **Trading functionality** — buy/sell flow not implemented
 - **Search** — no stock search functionality
 
-## Dependencies
+## 📦 Dependencies
 
 **Production:**
 | Package | Version | Purpose |
@@ -399,7 +426,7 @@ src/
 | `eslint` | ^9 | Linter |
 | `eslint-config-next` | 16.2.1 | Next.js ESLint config |
 
-## Environment Variables
+## 🔐 Environment Variables
 
 | Variable | Description | Where to find |
 |----------|-------------|--------------|
@@ -410,7 +437,7 @@ These must be set in:
 - `.env.local` for local development
 - Vercel project settings for production deployment
 
-## Development Commands
+## 📝 Development Commands
 
 ```bash
 npm run dev       # Start dev server at http://localhost:3000
@@ -419,7 +446,7 @@ npm run lint      # Run ESLint
 npm run start     # Start production server (after build)
 ```
 
-## Design System
+## 🎨 Design System
 
 **Color palette:**
 - Primary: Violet (`#a78bfa` → `#6d28d9`)
