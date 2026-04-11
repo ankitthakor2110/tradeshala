@@ -1,10 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { dashboardConfig } from "@/config/dashboard";
 import { getMarketStatus } from "@/services/dashboard.service";
 import { signOut, getCurrentUser } from "@/services/auth.service";
+import { useIsMounted } from "@/hooks/useIsMounted";
+import { useBrokerConnection } from "@/hooks/useBrokerConnection";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 
 interface DashboardNavbarProps {
@@ -18,7 +21,8 @@ export default function DashboardNavbar({
   const router = useRouter();
   const { navbar } = dashboardConfig;
 
-  const [mounted, setMounted] = useState(false);
+  const mounted = useIsMounted();
+  const broker = useBrokerConnection();
   const [marketOpen, setMarketOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [userInitials, setUserInitials] = useState("U");
@@ -29,7 +33,7 @@ export default function DashboardNavbar({
   const pageTitle = navbar.pageTitles[pathname] ?? navbar.defaultTitle;
 
   useEffect(() => {
-    setMounted(true);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only time-dependent value
     setMarketOpen(getMarketStatus());
 
     const interval = setInterval(() => {
@@ -116,6 +120,34 @@ export default function DashboardNavbar({
           {marketOpen ? navbar.marketOpenLabel : navbar.marketClosedLabel}
         </div>
 
+        {/* Broker status */}
+        <Link
+          href="/dashboard/broker"
+          className="hidden sm:flex items-center gap-1.5 text-xs cursor-pointer transition-colors duration-200 hover:opacity-80"
+        >
+          {broker.isConnected && broker.isExpired ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-red-400" />
+              <span className="text-red-400 font-medium">Token expired</span>
+            </>
+          ) : broker.isConnected && broker.isExpiringSoon ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-orange-400 animate-pulse" />
+              <span className="text-orange-400 font-medium">Expires soon</span>
+            </>
+          ) : broker.isConnected ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+              <span className="text-green-400 font-medium">{broker.brokerName}</span>
+            </>
+          ) : (
+            <>
+              <span className="w-2 h-2 rounded-full bg-gray-600" />
+              <span className="text-gray-500">No broker</span>
+            </>
+          )}
+        </Link>
+
         {/* Notification bell */}
         <button className={`${INTERACTION_CLASSES.iconButton} text-gray-400 hover:text-white relative`}>
           <svg
@@ -169,6 +201,13 @@ export default function DashboardNavbar({
                 </div>
               </div>
               <div className="py-1">
+                <Link
+                  href="/dashboard/profile"
+                  onClick={() => setProfileOpen(false)}
+                  className={`${INTERACTION_CLASSES.dropdownItem} block text-sm text-gray-300`}
+                >
+                  {navbar.profileMenuItems.viewProfile}
+                </Link>
                 <button
                   onClick={handleLogout}
                   className={`${INTERACTION_CLASSES.dropdownItem} w-full text-left text-sm text-red-400`}

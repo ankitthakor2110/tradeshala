@@ -1,10 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import FormInput from "@/components/ui/FormInput";
 import BrandLogo from "@/components/ui/BrandLogo";
+import { useIsMounted } from "@/hooks/useIsMounted";
 import { authConfig } from "@/config/auth";
 import { validatePassword } from "@/utils/validation";
 import { resetPassword } from "@/services/auth.service";
@@ -22,7 +22,7 @@ export default function ResetPasswordPage() {
   const { resetPassword: config, errors } = authConfig;
   const router = useRouter();
 
-  const [mounted, setMounted] = useState(false);
+  const mounted = useIsMounted();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -38,10 +38,6 @@ export default function ResetPasswordPage() {
   const strength: PasswordStrength = password
     ? getPasswordStrength(password)
     : "weak";
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (success) {

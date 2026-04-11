@@ -2,13 +2,13 @@
 
 import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { useIsMounted } from "@/hooks/useIsMounted";
 
 export function useAuthRedirect() {
-  const [mounted, setMounted] = useState(false);
+  const mounted = useIsMounted();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
     const supabase = createClient();
     supabase.auth.getSession().then(({ data: { session } }) => {
       setIsLoggedIn(!!session);

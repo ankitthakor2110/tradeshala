@@ -1,34 +1,74 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import {
-  LineChart,
-  Line,
-  ResponsiveContainer,
-  YAxis,
-} from "recharts";
+import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import { dashboardConfig } from "@/config/dashboard";
 import {
   getGreeting,
   getMarketStatus,
-  getPortfolioStats,
 } from "@/services/dashboard.service";
 import { getCurrentUser } from "@/services/auth.service";
-import { getPnLColor, getPnLBgColor } from "@/utils/colors";
+import { getNiftyData, getBankNiftyData } from "@/services/market-data.service";
+import { getPnLColor } from "@/utils/colors";
+import { useIsMounted } from "@/hooks/useIsMounted";
+import { useBrokerConnection } from "@/hooks/useBrokerConnection";
+import IndexCard from "@/components/dashboard/IndexCard";
 import type { DashboardStats, IndexData, StockGainerLoser } from "@/types/database";
 
 export default function DashboardPage() {
-  const [mounted, setMounted] = useState(false);
+  const mounted = useIsMounted();
+  const broker = useBrokerConnection();
   const [greeting, setGreeting] = useState("");
   const [userName, setUserName] = useState("");
   const [marketOpen, setMarketOpen] = useState(false);
-  const [stats, setStats] = useState<DashboardStats>(dashboardConfig.mockStats);
+  const stats: DashboardStats = dashboardConfig.mockStats;
+  const [indices, setIndices] = useState<IndexData[]>(dashboardConfig.mockIndices as unknown as IndexData[]);
+  const [isLiveData, setIsLiveData] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
-  const { mockIndices, mockGainers, mockLosers, labels, currency } =
-    dashboardConfig;
+  const { mockGainers, mockLosers, labels, currency } = dashboardConfig;
+
+  const fetchLiveIndices = useCallback(async () => {
+    const [nifty, bankNifty] = await Promise.all([
+      getNiftyData(),
+      getBankNiftyData(),
+    ]);
+
+    if (nifty || bankNifty) {
+      const liveIndices: IndexData[] = [];
+
+      if (nifty) {
+        liveIndices.push({
+          name: "NIFTY 50",
+          value: nifty.last_price,
+          change: nifty.change,
+          changePercent: Math.abs(nifty.change_percent),
+          isPositive: nifty.change >= 0,
+          sparklineData: (dashboardConfig.mockIndices[0] as unknown as IndexData).sparklineData,
+        });
+      }
+
+      if (bankNifty) {
+        liveIndices.push({
+          name: "BANK NIFTY",
+          value: bankNifty.last_price,
+          change: bankNifty.change,
+          changePercent: Math.abs(bankNifty.change_percent),
+          isPositive: bankNifty.change >= 0,
+          sparklineData: (dashboardConfig.mockIndices[1] as unknown as IndexData).sparklineData,
+        });
+      }
+
+      if (liveIndices.length > 0) {
+        setIndices(liveIndices);
+        setIsLiveData(true);
+        setLastUpdated(new Date().toISOString());
+      }
+    }
+  }, []);
 
   useEffect(() => {
-    setMounted(true);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only time-dependent values
     setGreeting(getGreeting());
     setMarketOpen(getMarketStatus());
 
@@ -41,6 +81,17 @@ export default function DashboardPage() {
       }
     });
   }, []);
+
+  // Fetch live data when broker is connected and not expired
+  useEffect(() => {
+    if (!broker.isConnected || broker.isExpired) return;
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch live data on broker connect
+    fetchLiveIndices();
+
+    const interval = setInterval(fetchLiveIndices, 30000);
+    return () => clearInterval(interval);
+  }, [broker.isConnected, broker.isExpired, fetchLiveIndices]);
 
   if (!mounted) return null;
 
@@ -58,14 +109,44 @@ export default function DashboardPage() {
         <p className="text-gray-400 mt-1">{dashboardConfig.welcomeSubtext}</p>
       </div>
 
+      {/* Broker status banner */}
+      {broker.isConnected && broker.isExpired && (
+        <Link
+          href="/dashboard/broker"
+          className="flex items-center gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-sm text-red-400 hover:border-red-500/40 transition-colors duration-200 cursor-pointer"
+        >
+          <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+          <span>
+            Your <span className="font-semibold">{broker.brokerName}</span> token has expired. Click here to reconnect &rarr;
+          </span>
+        </Link>
+      )}
+
+      {!broker.isConnected && (
+        <Link
+          href="/dashboard/broker"
+          className="flex items-center gap-3 p-4 bg-violet-500/10 border border-violet-500/20 rounded-xl text-sm text-violet-400 hover:border-violet-500/40 transition-colors duration-200 cursor-pointer group"
+        >
+          <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+          </svg>
+          <span>Connect a broker to get live market data &rarr;</span>
+          <span className="ml-auto text-xs text-violet-400/60 group-hover:text-violet-400 transition-colors duration-200">Showing demo data</span>
+        </Link>
+      )}
+
       {/* Index cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {mockIndices.map((index: IndexData) => (
+        {indices.map((index: IndexData) => (
           <IndexCard
             key={index.name}
             index={index}
             currency={currency}
             marketOpen={marketOpen}
+            isLive={isLiveData && !broker.isExpired}
+            lastUpdated={isLiveData ? lastUpdated : null}
           />
         ))}
       </div>
@@ -103,66 +184,6 @@ export default function DashboardPage() {
           stocks={mockLosers as unknown as StockGainerLoser[]}
           currency={currency}
         />
-      </div>
-    </div>
-  );
-}
-
-function IndexCard({
-  index,
-  currency,
-  marketOpen,
-}: {
-  index: IndexData;
-  currency: string;
-  marketOpen: boolean;
-}) {
-  const sparkData = index.sparklineData.map((v) => ({ v }));
-
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-white">{index.name}</h3>
-          <span
-            className={`w-2 h-2 rounded-full ${marketOpen ? "bg-violet-400 animate-pulse" : "bg-red-400"}`}
-          />
-        </div>
-        <span
-          className={`text-xs font-medium px-2 py-0.5 rounded-full ${getPnLBgColor(index.isPositive ? 1 : -1)}`}
-        >
-          {index.isPositive ? "+" : "-"}
-          {index.changePercent}%
-        </span>
-      </div>
-      <div className="flex items-end justify-between">
-        <div>
-          <p className="text-2xl font-bold text-white">
-            {currency}
-            {index.value.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-          </p>
-          <p
-            className={`text-sm mt-0.5 ${getPnLColor(index.isPositive ? 1 : -1)}`}
-          >
-            {index.isPositive ? "+" : ""}
-            {index.change.toFixed(2)} ({index.isPositive ? "+" : "-"}
-            {index.changePercent}%)
-          </p>
-        </div>
-        <div className="w-24 h-12" suppressHydrationWarning>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={sparkData}>
-              <YAxis domain={["dataMin", "dataMax"]} hide />
-              <Line
-                type="monotone"
-                dataKey="v"
-                stroke={index.isPositive ? "#22c55e" : "#ef4444"}
-                strokeWidth={1.5}
-                dot={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
       </div>
     </div>
   );

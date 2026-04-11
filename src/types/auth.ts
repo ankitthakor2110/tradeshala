@@ -21,6 +21,22 @@ export interface ResetPasswordFormData {
   confirmPassword: string;
 }
 
+export interface UpdateProfileData {
+  full_name: string;
+  phone_number: string;
+}
+
+export interface UpdatePasswordData {
+  current_password: string;
+  new_password: string;
+  confirm_password: string;
+}
+
+export interface DeleteAccountData {
+  confirmation_text: string;
+  password: string;
+}
+
 export type PasswordStrength = "weak" | "medium" | "strong";
 
 export interface ValidationResult {

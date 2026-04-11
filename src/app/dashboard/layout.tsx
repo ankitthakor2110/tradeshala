@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Sidebar from "@/components/dashboard/Sidebar";
 import DashboardNavbar from "@/components/dashboard/DashboardNavbar";
+import ToastContainer from "@/components/ui/Toast";
 
 export default function DashboardLayout({
   children,
@@ -18,6 +19,7 @@ export default function DashboardLayout({
       <main className="lg:ml-60 pt-16 min-h-screen">
         <div className="p-4 sm:p-6 lg:p-8">{children}</div>
       </main>
+      <ToastContainer />
     </div>
   );
 }

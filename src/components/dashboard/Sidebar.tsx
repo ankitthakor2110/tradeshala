@@ -1,8 +1,11 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { dashboardConfig } from "@/config/dashboard";
+import { getCurrentUser } from "@/services/auth.service";
+import { getActiveBroker } from "@/services/broker.service";
 import BrandLogo from "@/components/ui/BrandLogo";
 import SidebarIcon from "./SidebarIcon";
 
@@ -14,6 +17,16 @@ interface SidebarProps {
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { sidebar } = dashboardConfig;
+  const [brokerConnected, setBrokerConnected] = useState(false);
+
+  useEffect(() => {
+    getCurrentUser().then(async (user) => {
+      if (user) {
+        const broker = await getActiveBroker(user.id);
+        setBrokerConnected(!!broker);
+      }
+    });
+  }, []);
 
   return (
     <>
@@ -39,6 +52,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
         <nav className="flex-1 py-4 px-3 space-y-1 overflow-y-auto">
           {sidebar.items.map((item) => {
             const isActive = pathname === item.href;
+            const isBroker = item.href === "/dashboard/broker";
             return (
               <Link
                 key={item.href}
@@ -52,6 +66,9 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
               >
                 <SidebarIcon name={item.icon} />
                 {item.label}
+                {isBroker && brokerConnected && (
+                  <span className="ml-auto w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                )}
               </Link>
             );
           })}
@@ -62,7 +79,11 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
           <Link
             href={sidebar.settingsHref}
             onClick={onClose}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-400 hover:text-white hover:bg-gray-800 transition-colors duration-200"
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors duration-200 ${
+              pathname === sidebar.settingsHref
+                ? "bg-violet-500/10 text-violet-400 border border-violet-500/20"
+                : "text-gray-400 hover:text-white hover:bg-gray-800"
+            }`}
           >
             <SidebarIcon name="settings" />
             {sidebar.settingsLabel}

@@ -1,17 +1,17 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useIsMounted } from "@/hooks/useIsMounted";
 
 interface ScrollToTopProps {
   label: string;
 }
 
 export default function ScrollToTop({ label }: ScrollToTopProps) {
-  const [mounted, setMounted] = useState(false);
+  const mounted = useIsMounted();
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
     const onScroll = () => setVisible(window.scrollY > 300);
     window.addEventListener("scroll", onScroll);
     return () => window.removeEventListener("scroll", onScroll);

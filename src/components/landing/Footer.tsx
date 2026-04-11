@@ -6,7 +6,7 @@ interface FooterProps {
   footer: FooterConfig;
 }
 
-export default function Footer({ appName, footer }: FooterProps) {
+export default function Footer({ footer }: FooterProps) {
   return (
     <footer className="border-t border-gray-800 py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
