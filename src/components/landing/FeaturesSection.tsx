@@ -11,7 +11,7 @@ export default function FeaturesSection({ features }: FeaturesSectionProps) {
         <div className="text-center mb-16">
           <h2 className="text-3xl sm:text-4xl font-bold text-white">
             Everything You Need to{" "}
-            <span className="text-green-400">Trade Smart</span>
+            <span className="text-violet-400">Trade Smart</span>
           </h2>
           <p className="mt-4 text-gray-400 max-w-2xl mx-auto">
             Powerful tools and features designed to help you become a better
@@ -22,10 +22,10 @@ export default function FeaturesSection({ features }: FeaturesSectionProps) {
           {features.map((feature) => (
             <div
               key={feature.title}
-              className="bg-gray-900 border border-gray-800 rounded-xl p-6 hover:border-green-500/50 transition-colors group"
+              className="bg-gray-900 border border-gray-800 rounded-xl p-6 hover:border-violet-500/30 transition-colors group"
             >
               <div className="text-3xl mb-4">{feature.icon}</div>
-              <h3 className="text-lg font-semibold text-white mb-2 group-hover:text-green-400 transition-colors">
+              <h3 className="text-lg font-semibold text-white mb-2 group-hover:text-violet-400 transition-colors">
                 {feature.title}
               </h3>
               <p className="text-gray-400 text-sm leading-relaxed">

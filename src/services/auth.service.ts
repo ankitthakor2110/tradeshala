@@ -94,3 +94,49 @@ export async function getCurrentUser() {
     return null;
   }
 }
+
+export async function sendPasswordReset(
+  email: string
+): Promise<AuthResult> {
+  try {
+    const supabase = createClient();
+
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin + "/reset-password",
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, error: null };
+  } catch {
+    return {
+      success: false,
+      error: "Something went wrong. Please try again.",
+    };
+  }
+}
+
+export async function resetPassword(
+  newPassword: string
+): Promise<AuthResult> {
+  try {
+    const supabase = createClient();
+
+    const { error } = await supabase.auth.updateUser({
+      password: newPassword,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, error: null };
+  } catch {
+    return {
+      success: false,
+      error: "Something went wrong. Please try again.",
+    };
+  }
+}

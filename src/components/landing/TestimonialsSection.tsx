@@ -12,7 +12,7 @@ export default function TestimonialsSection({
       <div className="max-w-7xl mx-auto">
         <div className="text-center mb-16">
           <h2 className="text-3xl sm:text-4xl font-bold text-white">
-            Loved by <span className="text-green-400">Traders</span>
+            Loved by <span className="text-violet-400">Traders</span>
           </h2>
         </div>
         <div className="grid md:grid-cols-3 gap-6">
@@ -39,7 +39,7 @@ export default function TestimonialsSection({
                 &ldquo;{testimonial.text}&rdquo;
               </p>
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-green-500/20 rounded-full flex items-center justify-center text-green-400 text-sm font-semibold">
+                <div className="w-10 h-10 bg-violet-500/20 rounded-full flex items-center justify-center text-violet-400 text-sm font-semibold">
                   {testimonial.avatarInitials}
                 </div>
                 <div>

@@ -22,7 +22,7 @@ export default function ScrollToTop({ label }: ScrollToTopProps) {
   return (
     <button
       onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-      className={`group fixed bottom-8 right-8 z-50 w-12 h-12 rounded-full bg-green-500 hover:bg-green-400 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-green-500/25 text-white shadow-lg shadow-green-500/25 flex items-center justify-center cursor-pointer transition-all duration-200 hover:scale-110 active:scale-95 ${
+      className={`group fixed bottom-8 right-8 z-50 w-12 h-12 rounded-full bg-violet-500 hover:bg-violet-400 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-violet-500/25 text-white shadow-lg shadow-violet-500/25 flex items-center justify-center cursor-pointer transition-all duration-200 hover:scale-110 active:scale-95 ${
         visible
           ? "opacity-100 pointer-events-auto translate-y-0"
           : "opacity-0 pointer-events-none translate-y-4"

@@ -14,14 +14,14 @@ export default function HowItWorksSection({ steps }: HowItWorksSectionProps) {
         <div className="text-center mb-16">
           <h2 className="text-3xl sm:text-4xl font-bold text-white">
             Get Started in{" "}
-            <span className="text-green-400">3 Simple Steps</span>
+            <span className="text-violet-400">3 Simple Steps</span>
           </h2>
         </div>
         <div className="space-y-8">
           {steps.map((step) => (
             <div key={step.stepNumber} className="flex items-start gap-6">
-              <div className="flex-shrink-0 w-12 h-12 bg-green-500/20 border border-green-500/30 rounded-full flex items-center justify-center">
-                <span className="text-green-400 font-bold text-lg">
+              <div className="flex-shrink-0 w-12 h-12 bg-violet-500/20 border border-violet-500/30 rounded-full flex items-center justify-center">
+                <span className="text-violet-400 font-bold text-lg">
                   {step.stepNumber}
                 </span>
               </div>

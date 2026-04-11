@@ -40,6 +40,35 @@ export interface WatchlistItem {
   added_at: string;
 }
 
+export interface IndexData {
+  name: string;
+  value: number;
+  change: number;
+  changePercent: number;
+  isPositive: boolean;
+  sparklineData: number[];
+}
+
+export interface StockGainerLoser {
+  symbol: string;
+  change: number;
+  changePercent: number;
+  isPositive: boolean;
+}
+
+export interface DashboardStats {
+  virtualCash: number;
+  portfolioValue: number;
+  totalPnL: number;
+  totalPnLPercent: number;
+}
+
+export interface SidebarItem {
+  label: string;
+  href: string;
+  icon: string;
+}
+
 export interface Database {
   public: {
     Tables: {

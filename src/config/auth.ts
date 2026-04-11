@@ -1,6 +1,21 @@
 export const authConfig = {
   blockedEmailDomains: ["yopmail.com", "mailinator.com", "dispostable.com"],
 
+  loginPanel: {
+    brandLabel: "TradeShala",
+    proBadge: "PRO",
+    headlines: ["Track Markets.", "Trade Smarter.", "Win Consistently."],
+    subtext:
+      "India's most powerful paper trading platform. Practice with virtual funds, master strategies, and build confidence before entering real markets.",
+    features: ["+ Live Option Chain", "+ Paper Trading", "+ P&L Analytics"],
+    stats: [
+      { value: "50K+", label: "TRADERS" },
+      { value: "99%", label: "UPTIME" },
+      { value: "\u20B90", label: "HIDDEN FEES" },
+    ],
+    poweredBy: "Powered by TradeShala",
+  },
+
   tabs: {
     loginLabel: "Login",
     signUpLabel: "Sign Up",
@@ -15,10 +30,11 @@ export const authConfig = {
     passwordPlaceholder: "Enter your password",
     rememberMeLabel: "Remember me",
     forgotPasswordText: "Forgot Password?",
-    forgotPasswordHref: "#",
+    forgotPasswordHref: "/forgot-password",
     submitButton: "Sign In",
+    submitArrow: "\u2192",
     noAccountText: "Don't have an account?",
-    createAccountText: "Create Account",
+    createAccountText: "Create one free \u2192",
     createAccountHref: "/signup",
   },
 
@@ -40,9 +56,41 @@ export const authConfig = {
     privacyText: "Privacy Policy",
     privacyModalTitle: "Privacy Policy",
     submitButton: "Create Account",
+    submitArrow: "\u2192",
     hasAccountText: "Already have an account?",
-    signInText: "Sign In",
+    signInText: "Sign in \u2192",
     signInHref: "/login",
+  },
+
+  forgotPassword: {
+    title: "Forgot Password",
+    subtitle: "Enter your email and we'll send you a reset link",
+    emailLabel: "Email Address",
+    emailPlaceholder: "you@example.com",
+    submitButton: "Send Reset Link",
+    submitArrow: "\u2192",
+    sendingButton: "Sending...",
+    backToLogin: "\u2190 Back to Login",
+    backToLoginHref: "/login",
+    successMessage:
+      "Check your email! We sent a password reset link to",
+  },
+
+  resetPassword: {
+    title: "Reset Password",
+    subtitle: "Enter your new password below",
+    passwordLabel: "New Password",
+    passwordPlaceholder: "Enter new password",
+    confirmPasswordLabel: "Confirm New Password",
+    confirmPasswordPlaceholder: "Re-enter new password",
+    submitButton: "Update Password",
+    updatingButton: "Updating...",
+    successMessage: "Password updated! Redirecting to login...",
+    strengthLabels: {
+      weak: "Weak",
+      medium: "Medium",
+      strong: "Strong",
+    },
   },
 
   errors: {
@@ -63,6 +111,8 @@ export const authConfig = {
     agreeToTermsRequired: "You must agree to the Terms & Conditions.",
     loginFailed: "Invalid email or password. Please try again.",
     signupFailed: "Could not create account. Please try again.",
+    resetEmailFailed: "Could not send reset email. Please try again.",
+    resetPasswordFailed: "Could not update password. Please try again.",
     genericError: "Something went wrong. Please try again.",
   },
 
@@ -70,6 +120,8 @@ export const authConfig = {
     signingIn: "Signing In...",
     creatingAccount: "Creating Account...",
   },
+
+  securityText: "\uD83D\uDD12 256-bit SSL encrypted \u00B7 Your data is safe",
 
   success: {
     signupComplete:

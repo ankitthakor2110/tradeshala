@@ -8,11 +8,11 @@ interface HeroSectionProps {
 export default function HeroSection({ hero }: HeroSectionProps) {
   return (
     <section className="relative pt-32 pb-20 px-4 sm:px-6 lg:px-8 overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-b from-green-500/10 via-transparent to-transparent" />
+      <div className="absolute inset-0 bg-gradient-to-b from-violet-500/10 via-transparent to-transparent" />
       <div className="relative max-w-4xl mx-auto text-center">
         <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold tracking-tight">
           <span className="text-white">{hero.headline} </span>
-          <span className="text-green-400">{hero.highlightedWord}</span>
+          <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-purple-300">{hero.highlightedWord}</span>
         </h1>
         <p className="mt-6 text-lg sm:text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed">
           {hero.subheadline}
@@ -24,8 +24,8 @@ export default function HeroSection({ hero }: HeroSectionProps) {
               href={button.href}
               className={
                 button.variant === "primary"
-                  ? "bg-green-500 hover:bg-green-400 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-green-500/25 text-white px-8 py-4 rounded-lg font-semibold text-lg cursor-pointer transition-all duration-200 active:scale-95 shadow-lg shadow-green-500/25"
-                  : "border border-green-500 text-green-400 hover:bg-green-500/10 hover:border-green-400 hover:-translate-y-0.5 px-8 py-4 rounded-lg font-semibold text-lg cursor-pointer transition-all duration-200 active:scale-95"
+                  ? "bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-bold px-8 py-4 rounded-xl text-lg transition-all duration-200 hover:shadow-2xl hover:shadow-violet-500/30 hover:-translate-y-0.5 active:scale-95"
+                  : "border border-gray-700 hover:border-violet-500/50 text-gray-300 hover:text-white font-semibold px-8 py-4 rounded-xl text-lg transition-all duration-200 hover:bg-gray-800"
               }
             >
               {button.label}
@@ -36,9 +36,9 @@ export default function HeroSection({ hero }: HeroSectionProps) {
           {hero.badges.map((badge) => (
             <span
               key={badge.text}
-              className="inline-flex items-center gap-1.5 text-sm text-gray-400 bg-gray-800/50 px-3 py-1.5 rounded-full"
+              className="inline-flex items-center gap-1.5 text-sm bg-violet-500/10 border border-violet-500/20 text-violet-400 px-3 py-1.5 rounded-full"
             >
-              <span className="w-1.5 h-1.5 bg-green-400 rounded-full" />
+              <span className="w-1.5 h-1.5 bg-violet-400 rounded-full" />
               {badge.text}
             </span>
           ))}

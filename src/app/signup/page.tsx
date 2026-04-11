@@ -4,10 +4,12 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import FormInput from "@/components/ui/FormInput";
+import BrandLogo from "@/components/ui/BrandLogo";
 import Modal from "@/components/ui/Modal";
 import TermsContent from "@/components/legal/TermsContent";
 import PrivacyContent from "@/components/legal/PrivacyContent";
 import { authConfig } from "@/config/auth";
+import { INTERACTION_CLASSES } from "@/styles/interactions";
 import {
   validateEmail,
   validatePassword,
@@ -17,7 +19,7 @@ import { signUp } from "@/services/auth.service";
 import type { SignupFormData } from "@/types/auth";
 
 export default function SignupPage() {
-  const { signup, errors, loading } = authConfig;
+  const { signup, errors, loading, loginPanel, securityText } = authConfig;
   const router = useRouter();
 
   const [form, setForm] = useState<SignupFormData>({
@@ -99,21 +101,71 @@ export default function SignupPage() {
   const hasErrors = Object.values(fieldErrors).some((err) => err !== null);
 
   return (
-    <main className="min-h-screen bg-gray-950 flex items-center justify-center px-4 py-12">
+    <main className="min-h-screen flex flex-col md:flex-row">
+      <div className="hidden md:flex md:w-1/2 relative bg-gray-950 dot-grid flex-col justify-between p-12">
+        {/* Top: Logo */}
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-violet-600 rounded-xl flex items-center justify-center">
+            <span className="text-white text-lg">{"\u2197"}</span>
+          </div>
+          <BrandLogo />
+          <span className="text-xs bg-violet-500/20 text-violet-300 border border-violet-500/30 px-2 py-0.5 rounded-full font-semibold">
+            {loginPanel.proBadge}
+          </span>
+        </div>
+
+        {/* Middle: Headlines */}
+        <div>
+          <h2 className="text-4xl font-extrabold leading-tight">
+            <span className="text-white">{loginPanel.headlines[0]}</span>
+            <br />
+            <span className="text-white">{loginPanel.headlines[1]}</span>
+            <br />
+            <span className="text-violet-400">{loginPanel.headlines[2]}</span>
+          </h2>
+          <p className="mt-4 text-gray-400 text-sm leading-relaxed max-w-md">
+            {loginPanel.subtext}
+          </p>
+          <div className="mt-6 flex flex-wrap gap-2">
+            {loginPanel.features.map((f) => (
+              <span
+                key={f}
+                className="border border-gray-700 text-gray-400 text-sm px-3 py-1 rounded-full"
+              >
+                {f}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Bottom: Stats */}
+        <div>
+          <div className="flex items-center gap-8">
+            {loginPanel.stats.map((s) => (
+              <div key={s.label}>
+                <span className="text-white font-bold">{s.value}</span>{" "}
+                <span className="text-gray-500 text-xs uppercase tracking-wider">
+                  {s.label}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-4 text-gray-600 text-xs">
+            {"\u26A1"} {loginPanel.poweredBy}
+          </p>
+        </div>
+      </div>
+      <div className="w-full md:w-1/2 bg-gray-900 flex items-center justify-center p-8">
       <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <Link href="/" className="inline-block">
-            <span className="text-2xl font-bold text-white">
-              Trade<span className="text-green-400">Shala</span>
-            </span>
-          </Link>
-          <h1 className="mt-6 text-3xl font-bold text-white">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-white">
             {signup.title}
           </h1>
           <p className="mt-2 text-gray-400">{signup.subtitle}</p>
+          <div className="w-12 h-1 bg-violet-500 rounded-full mt-3" />
         </div>
 
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-8">
+        <div>
           {formError && (
             <div className="mb-5 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-400">
               {formError}
@@ -164,14 +216,14 @@ export default function SignupPage() {
                   onChange={(e) =>
                     updateField("agreeToTerms", e.target.checked)
                   }
-                  className="mt-1 w-4 h-4 rounded border-gray-700 bg-gray-800 text-green-500 focus:ring-2 focus:ring-green-500/50 focus:ring-offset-0 cursor-pointer transition-colors duration-200"
+                  className="mt-1 w-4 h-4 rounded border-gray-700 bg-gray-800 text-violet-500 focus:ring-2 focus:ring-violet-500/50 focus:ring-offset-0 cursor-pointer transition-colors duration-200"
                 />
                 <span className="text-sm text-gray-400">
                   {signup.agreeText}{" "}
                   <button
                     type="button"
                     onClick={() => setIsTermsOpen(true)}
-                    className="text-green-400 hover:text-green-300 underline underline-offset-4 cursor-pointer transition-colors duration-200"
+                    className={`${INTERACTION_CLASSES.textLink} underline`}
                   >
                     {signup.termsText}
                   </button>{" "}
@@ -179,7 +231,7 @@ export default function SignupPage() {
                   <button
                     type="button"
                     onClick={() => setIsPrivacyOpen(true)}
-                    className="text-green-400 hover:text-green-300 underline underline-offset-4 cursor-pointer transition-colors duration-200"
+                    className={`${INTERACTION_CLASSES.textLink} underline`}
                   >
                     {signup.privacyText}
                   </button>
@@ -195,9 +247,9 @@ export default function SignupPage() {
             <button
               type="submit"
               disabled={hasErrors || isLoading}
-              className="w-full bg-green-500 hover:bg-green-400 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-green-500/25 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none text-white py-3 rounded-lg font-semibold cursor-pointer transition-all duration-200 active:scale-95"
+              className="w-full bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-bold py-4 rounded-xl transition-all duration-200 hover:shadow-lg hover:shadow-violet-500/25 hover:-translate-y-0.5 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none flex items-center justify-center gap-2 cursor-pointer"
             >
-              {isLoading ? loading.creatingAccount : signup.submitButton}
+              {isLoading ? loading.creatingAccount : <>{signup.submitButton} {signup.submitArrow}</>}
             </button>
           </form>
         </div>
@@ -206,11 +258,16 @@ export default function SignupPage() {
           {signup.hasAccountText}{" "}
           <Link
             href={signup.signInHref}
-            className="text-green-400 hover:text-green-300 hover:underline underline-offset-4 font-medium cursor-pointer transition-colors duration-200"
+            className="text-violet-400 hover:text-violet-300 hover:underline underline-offset-4 font-medium cursor-pointer transition-colors duration-200"
           >
             {signup.signInText}
           </Link>
         </p>
+
+        <p className="mt-6 text-center text-gray-600 text-xs">
+          {securityText}
+        </p>
+      </div>
       </div>
 
       <Modal

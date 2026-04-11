@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useCallback } from "react";
+import { INTERACTION_CLASSES } from "@/styles/interactions";
 import type { ModalProps } from "@/types/legal";
 
 export default function Modal({ isOpen, onClose, title, children }: ModalProps) {
@@ -42,7 +43,7 @@ export default function Modal({ isOpen, onClose, title, children }: ModalProps) 
           <h2 className="text-lg font-semibold text-white">{title}</h2>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-white cursor-pointer transition-all duration-200 p-1 hover:bg-gray-800 rounded-md active:scale-90"
+            className={`${INTERACTION_CLASSES.iconButton} text-gray-400 hover:text-white`}
             aria-label="Close"
           >
             <svg

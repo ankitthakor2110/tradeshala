@@ -12,6 +12,17 @@ export interface SignupFormData {
   agreeToTerms: boolean;
 }
 
+export interface ForgotPasswordFormData {
+  email: string;
+}
+
+export interface ResetPasswordFormData {
+  password: string;
+  confirmPassword: string;
+}
+
+export type PasswordStrength = "weak" | "medium" | "strong";
+
 export interface ValidationResult {
   isValid: boolean;
   error: string | null;

@@ -10,7 +10,7 @@ export default function StatsSection({ stats }: StatsSectionProps) {
       <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-8">
         {stats.map((stat) => (
           <div key={stat.label} className="text-center">
-            <div className="text-3xl sm:text-4xl font-bold text-green-400">
+            <div className="text-4xl font-extrabold text-violet-400 mb-2">
               {stat.value}
             </div>
             <div className="mt-1 text-sm text-gray-400">{stat.label}</div>
