@@ -9,8 +9,9 @@ export const dashboardConfig = {
   sidebar: {
     items: [
       { label: "Dashboard", href: "/dashboard", icon: "grid" },
-      { label: "Portfolio", href: "/dashboard/portfolio", icon: "briefcase" },
       { label: "Trade", href: "/dashboard/trade", icon: "trade" },
+      { label: "Positions", href: "/dashboard/positions", icon: "positions" },
+      { label: "Portfolio", href: "/dashboard/portfolio", icon: "briefcase" },
       { label: "Watchlist", href: "/dashboard/watchlist", icon: "eye" },
       { label: "Data & Brokers", href: "/dashboard/broker", icon: "link", visible: false },
       { label: "Profile", href: "/dashboard/profile", icon: "user" },
@@ -26,6 +27,7 @@ export const dashboardConfig = {
       "/dashboard/portfolio": "Portfolio",
       "/dashboard/trade": "Trade Simulator",
       "/dashboard/trades": "Trades",
+      "/dashboard/positions": "Positions",
       "/dashboard/watchlist": "Watchlist",
       "/dashboard/settings": "Settings",
       "/dashboard/profile": "Profile & Settings",

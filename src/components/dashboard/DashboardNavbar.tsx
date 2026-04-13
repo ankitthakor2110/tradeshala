@@ -10,11 +10,11 @@ import { useIsMounted } from "@/hooks/useIsMounted";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 
 interface DashboardNavbarProps {
-  onMenuToggle: () => void;
+  onMenuClick: () => void;
 }
 
 export default function DashboardNavbar({
-  onMenuToggle,
+  onMenuClick,
 }: DashboardNavbarProps) {
   const pathname = usePathname();
   const router = useRouter();
@@ -94,11 +94,12 @@ export default function DashboardNavbar({
   if (!mounted) return null;
 
   return (
-    <header className="fixed top-0 right-0 left-0 lg:left-[220px] z-30 h-16 bg-gray-950/80 backdrop-blur-md border-b border-gray-800 flex items-center px-4 sm:px-6 gap-4">
+    <header className="fixed top-0 right-0 left-0 md:left-[220px] z-30 h-16 bg-gray-950/80 backdrop-blur-md border-b border-gray-800 flex items-center px-3 sm:px-4 md:px-6 gap-3 sm:gap-4">
       {/* Hamburger */}
       <button
-        onClick={onMenuToggle}
-        className={`${INTERACTION_CLASSES.iconButton} lg:hidden text-gray-400 hover:text-white`}
+        onClick={onMenuClick}
+        className={`${INTERACTION_CLASSES.iconButton} md:hidden text-gray-400 hover:text-white`}
+        aria-label="Open menu"
       >
         <svg
           className="w-6 h-6"
@@ -116,10 +117,10 @@ export default function DashboardNavbar({
       </button>
 
       {/* Page title */}
-      <h1 className="text-lg font-semibold text-white">{pageTitle}</h1>
+      <h1 className="text-sm md:text-base font-semibold text-white truncate">{pageTitle}</h1>
 
-      <div className="ml-auto flex items-center gap-4">
-        {/* Market status */}
+      <div className="ml-auto flex items-center gap-2 sm:gap-4">
+        {/* Market status — full on sm+, dot-only on mobile */}
         <div
           className={`hidden sm:flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full ${
             marketOpen
@@ -132,8 +133,21 @@ export default function DashboardNavbar({
           />
           {marketOpen ? navbar.marketOpenLabel : navbar.marketClosedLabel}
         </div>
+        <div
+          className={`sm:hidden flex items-center justify-center w-8 h-8 rounded-full ${
+            marketOpen
+              ? "bg-violet-500/10 border border-violet-500/20"
+              : "bg-red-500/10 border border-red-500/20"
+          }`}
+          title={marketOpen ? navbar.marketOpenLabel : navbar.marketClosedLabel}
+          aria-label={marketOpen ? navbar.marketOpenLabel : navbar.marketClosedLabel}
+        >
+          <span
+            className={`w-2 h-2 rounded-full ${marketOpen ? "bg-violet-400 animate-pulse" : "bg-red-400"}`}
+          />
+        </div>
 
-        {/* Data status indicator */}
+        {/* Data status — full on sm+, dot-only on mobile */}
         <div className="hidden sm:flex items-center gap-1.5 text-xs">
           {dataStatus === "live" ? (
             <>
@@ -153,6 +167,22 @@ export default function DashboardNavbar({
               <span className="w-2 h-2 rounded-full bg-gray-500" />
               <span className="text-gray-400 font-medium">Demo Mode</span>
             </>
+          )}
+        </div>
+        <div
+          className="sm:hidden flex items-center justify-center w-8 h-8"
+          title={dataStatus === "live" ? "Live Data" : dataStatus === "cached" ? "Cached" : "Demo Mode"}
+          aria-label={dataStatus === "live" ? "Live Data" : dataStatus === "cached" ? "Cached" : "Demo Mode"}
+        >
+          {dataStatus === "live" ? (
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+            </span>
+          ) : (
+            <span
+              className={`w-2 h-2 rounded-full ${dataStatus === "cached" ? "bg-yellow-500" : "bg-gray-500"}`}
+            />
           )}
         </div>
 

@@ -190,13 +190,13 @@ function DashboardContent() {
     : "demo";
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 sm:space-y-6">
       {/* Welcome */}
       <div>
-        <h2 className="text-2xl font-bold text-white">
+        <h2 className="text-xl lg:text-2xl font-bold text-white">
           {greeting}, {userName}!
         </h2>
-        <p className="text-gray-400 mt-1">{dashboardConfig.welcomeSubtext}</p>
+        <p className="text-xs sm:text-sm text-gray-400 mt-1">{dashboardConfig.welcomeSubtext}</p>
       </div>
 
       {/* Market + data status banner */}
@@ -231,11 +231,11 @@ function DashboardContent() {
       </div>
 
       {/* Portfolio summary */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-        <h3 className="text-lg font-semibold text-white mb-4">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-4 md:p-6">
+        <h3 className="text-base md:text-lg font-semibold text-white mb-4">
           {labels.portfolioSummary}
         </h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
           <StatCard label={labels.virtualCash} value={formatCurrency(stats.virtualCash)} />
           <StatCard label={labels.portfolioValue} value={formatCurrency(stats.portfolioValue)} />
           <StatCard
@@ -346,9 +346,9 @@ function StatCard({
   color?: string;
 }) {
   return (
-    <div className="bg-gray-800/50 rounded-lg p-4">
+    <div className="bg-gray-800/50 rounded-lg p-3 md:p-4">
       <p className="text-xs text-gray-400 mb-1">{label}</p>
-      <p className={`text-lg font-bold ${color ?? "text-white"}`}>{value}</p>
+      <p className={`text-base md:text-lg font-bold ${color ?? "text-white"} truncate`}>{value}</p>
     </div>
   );
 }
@@ -369,7 +369,7 @@ function StockList({
   source: "dhan" | "upstox" | "cache" | "demo";
 }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+    <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-4 md:p-5">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-white">{title}</h3>
         {!loading && <LiveBadge source={source} lastUpdated={lastUpdated} />}

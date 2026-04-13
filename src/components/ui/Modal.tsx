@@ -27,7 +27,7 @@ export default function Modal({ isOpen, onClose, title, children }: ModalProps) 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 animate-[fadeIn_200ms_ease-out]"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6 animate-[fadeIn_200ms_ease-out]"
       onClick={onClose}
     >
       {/* Overlay */}
@@ -35,11 +35,11 @@ export default function Modal({ isOpen, onClose, title, children }: ModalProps) 
 
       {/* Modal */}
       <div
-        className="relative w-full max-w-2xl max-h-[90vh] bg-gray-900 border border-gray-800 rounded-xl flex flex-col animate-[slideUp_200ms_ease-out]"
+        className="relative w-full max-w-2xl max-h-[92vh] sm:max-h-[90vh] bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-xl flex flex-col animate-[slideUp_200ms_ease-out]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800 shrink-0">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-800 shrink-0">
           <h2 className="text-lg font-semibold text-white">{title}</h2>
           <button
             onClick={onClose}
@@ -63,7 +63,7 @@ export default function Modal({ isOpen, onClose, title, children }: ModalProps) 
         </div>
 
         {/* Scrollable content */}
-        <div className="overflow-y-auto p-6">{children}</div>
+        <div className="overflow-y-auto p-4 sm:p-6">{children}</div>
       </div>
     </div>
   );

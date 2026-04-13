@@ -271,25 +271,25 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-8">
+    <div className="max-w-2xl mx-auto space-y-6 sm:space-y-8">
       {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-white">
+        <h2 className="text-xl lg:text-2xl font-bold text-white">
           {profileConfig.pageTitle}
         </h2>
-        <p className="text-sm text-gray-400 mt-1">
+        <p className="text-xs sm:text-sm text-gray-400 mt-1">
           Last updated: {formatDate(lastUpdated)}
         </p>
       </div>
 
       {/* Avatar card */}
-      <div className="flex items-center gap-5">
+      <div className="flex flex-col sm:flex-row items-center sm:items-center gap-3 sm:gap-5 text-center sm:text-left">
         <div className="w-20 h-20 rounded-full bg-violet-500/20 flex items-center justify-center shrink-0">
           <span className="text-3xl font-bold text-violet-400">
             {userInitial}
           </span>
         </div>
-        <div className="min-w-0">
+        <div className="min-w-0 w-full sm:w-auto">
           <p className="text-lg font-semibold text-white truncate">
             {fullName || "—"}
           </p>
@@ -304,7 +304,7 @@ export default function ProfilePage() {
       )}
 
       {/* Section 1 — Personal Information */}
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-4 md:p-6">
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-lg font-semibold text-white">
             {sections.personalInfo}
@@ -413,7 +413,7 @@ export default function ProfilePage() {
       </div>
 
       {/* Section 2 — Security */}
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-4 md:p-6">
         <h3 className="text-lg font-semibold text-white mb-6">
           {sections.security}
         </h3>
@@ -488,7 +488,7 @@ export default function ProfilePage() {
       </div>
 
       {/* Section 3 — Danger Zone */}
-      <div className="bg-gray-900 border border-red-500/20 rounded-2xl p-6">
+      <div className="bg-gray-900 border border-red-500/20 rounded-xl md:rounded-2xl p-4 md:p-6">
         <h3 className="text-lg font-semibold text-red-400 mb-2">
           {sections.dangerZone}
         </h3>

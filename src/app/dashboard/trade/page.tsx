@@ -172,15 +172,15 @@ export default function TradePage() {
   const ls = indicesSource === "dhan" || indicesSource === "upstox" ? indicesSource : "demo";
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-4xl mx-auto space-y-5 sm:space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-white">{TRADE_CONFIG.page.title}</h2>
-          <p className="text-gray-400 text-sm mt-0.5">Search and trade stocks or options</p>
+          <h2 className="text-xl lg:text-2xl font-bold text-white">{TRADE_CONFIG.page.title}</h2>
+          <p className="text-gray-400 text-xs sm:text-sm mt-0.5">Search and trade stocks or options</p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-sm bg-violet-500/10 text-violet-400 border border-violet-500/20 px-4 py-1.5 rounded-full font-medium">{INR}{virtualCash.toLocaleString("en-IN")} available</span>
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <span className="text-xs sm:text-sm bg-violet-500/10 text-violet-400 border border-violet-500/20 px-3 sm:px-4 py-1 sm:py-1.5 rounded-full font-medium">{INR}{virtualCash.toLocaleString("en-IN")} available</span>
           <LiveBadge source={ls as "dhan" | "upstox" | "demo"} lastUpdated={nifty?.last_updated ?? null} />
         </div>
       </div>

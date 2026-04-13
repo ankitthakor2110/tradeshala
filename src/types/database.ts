@@ -207,10 +207,53 @@ export interface Position {
   pnl: number;
   pnl_percent: number;
   day_pnl: number;
+  day_open_price: number | null;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  max_profit: number;
+  max_loss: number;
+  notes: string | null;
+  tags: string[] | null;
   status: "OPEN" | "CLOSED";
   opened_at: string;
   closed_at: string | null;
   updated_at: string;
+}
+
+export interface DailyPnL {
+  id: string;
+  user_id: string;
+  date: string;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  total_pnl: number;
+  trades_count: number;
+  winning_trades: number;
+  losing_trades: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PositionSummary {
+  totalOpenPositions: number;
+  totalClosedToday: number;
+  openUnrealizedPnL: number;
+  openUnrealizedPnLPercent: number;
+  todayRealizedPnL: number;
+  todayTotalPnL: number;
+  overallPnL: number;
+  overallPnLPercent: number;
+  totalInvested: number;
+  currentValue: number;
+  winRate: number;
+  bestPosition: Position | null;
+  worstPosition: Position | null;
+}
+
+export interface PnLChartData {
+  time: string;
+  pnl: number;
+  cumulative: number;
 }
 
 export interface OrderFormData {
