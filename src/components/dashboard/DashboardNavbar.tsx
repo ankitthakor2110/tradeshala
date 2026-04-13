@@ -7,7 +7,6 @@ import { dashboardConfig } from "@/config/dashboard";
 import { getMarketStatus } from "@/services/dashboard.service";
 import { signOut, getCurrentUser } from "@/services/auth.service";
 import { useIsMounted } from "@/hooks/useIsMounted";
-import { useBrokerConnection } from "@/hooks/useBrokerConnection";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 
 interface DashboardNavbarProps {
@@ -22,8 +21,8 @@ export default function DashboardNavbar({
   const { navbar } = dashboardConfig;
 
   const mounted = useIsMounted();
-  const broker = useBrokerConnection();
   const [marketOpen, setMarketOpen] = useState(false);
+  const [dataStatus, setDataStatus] = useState<"live" | "cached" | "demo">("demo");
   const [profileOpen, setProfileOpen] = useState(false);
   const [userInitials, setUserInitials] = useState("U");
   const [userName, setUserName] = useState("");
@@ -57,6 +56,20 @@ export default function DashboardNavbar({
       }
     });
 
+    // Check data provider health
+    fetch("/api/market-data/health")
+      .then((r) => r.json())
+      .then((h) => {
+        if (h.dhan?.status === "ok" || h.upstox?.status === "ok") {
+          setDataStatus("live");
+        } else if (h.dhan?.status === "error" && h.upstox?.status === "error") {
+          setDataStatus("demo");
+        } else {
+          setDataStatus("cached");
+        }
+      })
+      .catch(() => setDataStatus("demo"));
+
     return () => clearInterval(interval);
   }, []);
 
@@ -81,7 +94,7 @@ export default function DashboardNavbar({
   if (!mounted) return null;
 
   return (
-    <header className="fixed top-0 right-0 left-0 lg:left-60 z-30 h-16 bg-gray-950/80 backdrop-blur-md border-b border-gray-800 flex items-center px-4 sm:px-6 gap-4">
+    <header className="fixed top-0 right-0 left-0 lg:left-[220px] z-30 h-16 bg-gray-950/80 backdrop-blur-md border-b border-gray-800 flex items-center px-4 sm:px-6 gap-4">
       {/* Hamburger */}
       <button
         onClick={onMenuToggle}
@@ -120,33 +133,28 @@ export default function DashboardNavbar({
           {marketOpen ? navbar.marketOpenLabel : navbar.marketClosedLabel}
         </div>
 
-        {/* Broker status */}
-        <Link
-          href="/dashboard/broker"
-          className="hidden sm:flex items-center gap-1.5 text-xs cursor-pointer transition-colors duration-200 hover:opacity-80"
-        >
-          {broker.isConnected && broker.isExpired ? (
+        {/* Data status indicator */}
+        <div className="hidden sm:flex items-center gap-1.5 text-xs">
+          {dataStatus === "live" ? (
             <>
-              <span className="w-2 h-2 rounded-full bg-red-400" />
-              <span className="text-red-400 font-medium">Token expired</span>
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+              </span>
+              <span className="text-green-400 font-medium">Live Data</span>
             </>
-          ) : broker.isConnected && broker.isExpiringSoon ? (
+          ) : dataStatus === "cached" ? (
             <>
-              <span className="w-2 h-2 rounded-full bg-orange-400 animate-pulse" />
-              <span className="text-orange-400 font-medium">Expires soon</span>
-            </>
-          ) : broker.isConnected ? (
-            <>
-              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-              <span className="text-green-400 font-medium">{broker.brokerName}</span>
+              <span className="w-2 h-2 rounded-full bg-yellow-500" />
+              <span className="text-yellow-400 font-medium">Cached</span>
             </>
           ) : (
             <>
-              <span className="w-2 h-2 rounded-full bg-gray-600" />
-              <span className="text-gray-500">No broker</span>
+              <span className="w-2 h-2 rounded-full bg-gray-500" />
+              <span className="text-gray-400 font-medium">Demo Mode</span>
             </>
           )}
-        </Link>
+        </div>
 
         {/* Notification bell */}
         <button className={`${INTERACTION_CLASSES.iconButton} text-gray-400 hover:text-white relative`}>

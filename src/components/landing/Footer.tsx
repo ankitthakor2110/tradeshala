@@ -1,4 +1,5 @@
 import Link from "next/link";
+import BrandLogo from "@/components/ui/BrandLogo";
 import type { FooterConfig } from "@/types/landing";
 
 interface FooterProps {
@@ -12,9 +13,7 @@ export default function Footer({ footer }: FooterProps) {
       <div className="max-w-7xl mx-auto">
         <div className="grid md:grid-cols-4 gap-8">
           <div>
-            <div className="text-xl font-bold text-violet-400 mb-3">
-              <span className="text-white">Trade</span><span className="text-violet-400">Shala</span>
-            </div>
+            <BrandLogo className="mb-3" />
             <p className="text-gray-400 text-sm leading-relaxed">
               {footer.description}
             </p>

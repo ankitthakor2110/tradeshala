@@ -24,8 +24,8 @@ export default function HeroSection({ hero }: HeroSectionProps) {
               href={button.href}
               className={
                 button.variant === "primary"
-                  ? "bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-bold px-8 py-4 rounded-xl text-lg transition-all duration-200 hover:shadow-2xl hover:shadow-violet-500/30 hover:-translate-y-0.5 active:scale-95"
-                  : "border border-gray-700 hover:border-violet-500/50 text-gray-300 hover:text-white font-semibold px-8 py-4 rounded-xl text-lg transition-all duration-200 hover:bg-gray-800"
+                  ? "cursor-pointer bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-bold px-8 py-4 rounded-xl text-lg transition-all duration-200 hover:shadow-2xl hover:shadow-violet-500/30 hover:-translate-y-0.5 active:scale-95"
+                  : "cursor-pointer border border-gray-700 hover:border-violet-500/50 text-gray-300 hover:text-white font-semibold px-8 py-4 rounded-xl text-lg transition-all duration-200 hover:bg-gray-800"
               }
             >
               {button.label}

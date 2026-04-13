@@ -50,6 +50,30 @@ export async function updateSession(request: NextRequest) {
       url.pathname = "/login";
       return NextResponse.redirect(url);
     }
+
+    // Admin-only routes
+    const adminOnlyRoutes = ["/connection-status"];
+    const isAdminRoute = adminOnlyRoutes.some((route) =>
+      request.nextUrl.pathname.startsWith(route)
+    );
+
+    if (isAdminRoute) {
+      if (!user) {
+        const url = request.nextUrl.clone();
+        url.pathname = "/login";
+        return NextResponse.redirect(url);
+      }
+
+      const userEmail = user.email;
+      const adminEmail = process.env.ADMIN_EMAIL;
+
+      if (userEmail !== adminEmail) {
+        const url = request.nextUrl.clone();
+        url.pathname = "/dashboard";
+        url.searchParams.set("error", "unauthorized");
+        return NextResponse.redirect(url);
+      }
+    }
   } catch {
     // If auth check fails, allow the request through
   }

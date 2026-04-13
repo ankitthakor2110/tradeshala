@@ -104,15 +104,7 @@ export default function SignupPage() {
     <main className="min-h-screen flex flex-col md:flex-row">
       <div className="hidden md:flex md:w-1/2 relative bg-gray-950 dot-grid flex-col justify-between p-12">
         {/* Top: Logo */}
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-violet-600 rounded-xl flex items-center justify-center">
-            <span className="text-white text-lg">{"\u2197"}</span>
-          </div>
-          <BrandLogo />
-          <span className="text-xs bg-violet-500/20 text-violet-300 border border-violet-500/30 px-2 py-0.5 rounded-full font-semibold">
-            {loginPanel.proBadge}
-          </span>
-        </div>
+        <BrandLogo />
 
         {/* Middle: Headlines */}
         <div>

@@ -352,9 +352,12 @@ function BrokerPageContent() {
     <div className="max-w-5xl mx-auto space-y-8">
       {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-white">{cfg.title}</h2>
-        <p className="text-gray-400 mt-1">{cfg.subtitle}</p>
+        <h2 className="text-2xl font-bold text-white">Data &amp; Brokers</h2>
+        <p className="text-gray-400 mt-1">Live market data and broker integrations</p>
       </div>
+
+      {/* Market Data Providers */}
+      <DataProvidersSection />
 
       {/* Token expiry warnings */}
       {activeBroker && expiryStatus === "expiring" && activeBrokerConfig?.authType === "oauth" && (
@@ -387,28 +390,30 @@ function BrokerPageContent() {
         </button>
       )}
 
-      {/* Status banner */}
-      {activeBroker && expiryStatus !== "expired" ? (
+      {/* Personal broker status banner */}
+      {activeBroker && expiryStatus !== "expired" && (
         <div className="flex items-center gap-3 p-4 bg-green-500/10 border border-green-500/20 rounded-xl text-sm text-green-400">
           <span className="w-2.5 h-2.5 rounded-full bg-green-400 animate-pulse shrink-0" />
           <span>
-            Connected to <span className="font-semibold">{activeBroker.broker_name}</span>{" "}
-            &middot; Live data active &middot; Last synced: {timeAgo(activeBroker.last_connected_at)}
+            Personal broker <span className="font-semibold">{activeBroker.broker_name}</span> connected{" "}
+            &middot; Last synced: {timeAgo(activeBroker.last_connected_at)}
           </span>
         </div>
-      ) : !activeBroker ? (
-        <div className="flex items-center gap-3 p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-xl text-sm text-yellow-400">
-          <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          No broker connected &middot; Connect a broker to get live market data
-        </div>
-      ) : null}
+      )}
 
       {/* Broker grid */}
       <div>
-        <h3 className="text-lg font-semibold text-white mb-1">Available Brokers</h3>
-        <p className="text-sm text-gray-400 mb-4">{cfg.rule}</p>
+        <h3 className="text-lg font-semibold text-white mb-1">Personal Broker Integration</h3>
+        <p className="text-sm text-gray-400 mb-4">Optional: Connect your personal broker account to sync your real portfolio</p>
+
+        <div className="flex items-start gap-3 p-4 bg-gray-800/50 border border-gray-700 rounded-xl text-sm text-gray-400 mb-4">
+          <svg className="w-4 h-4 shrink-0 mt-0.5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          This is optional. TradeShala already provides live market data for paper trading. Connect your broker only if you want to sync your real portfolio.
+        </div>
+
+        <p className="text-xs text-gray-500 mb-4">{cfg.rule}</p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {BROKERS.map((broker) => {
@@ -607,6 +612,118 @@ function BrokerPageContent() {
 }
 
 // --- Sub-components ---
+
+function DataProvidersSection() {
+  const [health, setHealth] = useState<{
+    dhan: { status: string; message: string; hint: string };
+    upstox: { status: string; message: string; tokenExpired: boolean; hint: string };
+    primary: string;
+    marketStatus: string;
+  } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/market-data/health")
+      .then((r) => r.json())
+      .then(setHealth)
+      .catch(() => {});
+  }, []);
+
+  const dhan = health?.dhan;
+  const upstoxH = health?.upstox;
+  const bothDown = dhan?.status === "error" && upstoxH?.status === "error" && health !== null;
+
+  const providers = [
+    {
+      name: "DhanHQ",
+      role: "Primary Provider",
+      roleBg: "bg-violet-500/10 text-violet-400 border-violet-500/20",
+      status: dhan?.status ?? "loading",
+      message: dhan?.message ?? "Checking...",
+      hint: dhan?.hint ?? "",
+      tags: ["Free", "NSE/BSE", "Real-time"],
+    },
+    {
+      name: "Upstox",
+      role: "Backup Provider",
+      roleBg: "bg-gray-800 text-gray-400 border-gray-700",
+      status: upstoxH?.status ?? "loading",
+      message: upstoxH?.message ?? "Checking...",
+      hint: upstoxH?.hint ?? "",
+      tokenExpired: upstoxH?.tokenExpired ?? false,
+      tags: ["Free", "NSE/BSE", "Real-time"],
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-lg font-semibold text-white mb-1">Market Data Providers</h3>
+        <p className="text-sm text-gray-400">Live data is automatically provided by our integrated data sources</p>
+      </div>
+
+      {/* Both down warning */}
+      {bothDown && (
+        <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-sm text-red-400">
+          <svg className="w-5 h-5 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <div>
+            <p className="font-semibold">Both data providers unavailable</p>
+            <p className="text-red-400/70 mt-1">Dashboard will show cached data until connectivity is restored.</p>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {providers.map((p) => (
+          <div key={p.name} className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-base font-bold text-white">{p.name}</h4>
+              <span className={`text-[10px] font-semibold border px-2 py-0.5 rounded-full ${p.roleBg}`}>
+                {p.role}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 mb-2">
+              {p.status === "ok" ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                  <span className="text-xs text-green-400">Connected</span>
+                </>
+              ) : p.status === "loading" ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-gray-500 animate-pulse" />
+                  <span className="text-xs text-gray-500">Checking...</span>
+                </>
+              ) : (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-red-400" />
+                  <span className="text-xs text-red-400">{p.message}</span>
+                </>
+              )}
+            </div>
+            {p.status === "error" && p.hint && (
+              <p className="text-[11px] text-orange-400/80 mb-2">{p.hint}</p>
+            )}
+            <div className="flex flex-wrap gap-1.5">
+              {p.tags.map((tag) => (
+                <span key={tag} className="text-[10px] bg-gray-800 text-gray-500 px-2 py-0.5 rounded-full">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-start gap-3 p-4 bg-violet-500/10 border border-violet-500/20 rounded-xl text-sm text-violet-400">
+        <svg className="w-5 h-5 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        Market data is automatically provided for all TradeShala users. No configuration needed to access live prices.
+      </div>
+    </div>
+  );
+}
 
 function StatusBadge({ status }: { status: "active" | "saved" | "none" }) {
   if (status === "active")

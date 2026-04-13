@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useAuthRedirect } from "@/hooks/useAuthRedirect";
+import BrandLogo from "@/components/ui/BrandLogo";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 
 export default function Error({
@@ -15,6 +16,9 @@ export default function Error({
   return (
     <main className="min-h-screen bg-gray-950 flex items-center justify-center px-4">
       <div className="text-center max-w-md">
+        <div className="flex justify-center mb-6">
+          <BrandLogo />
+        </div>
         <div className="text-6xl mb-6 text-red-400">!</div>
         <h1 className="text-2xl font-bold text-white mb-3">
           Something went wrong

@@ -40,21 +40,30 @@ export default function RootLayout({
           dangerouslySetInnerHTML={{
             __html: `
               try {
+                var bad = ['contenteditable','fdprocessedid','style'];
                 document.querySelectorAll('[contenteditable],[fdprocessedid]').forEach(function(el) {
-                  el.removeAttribute('contenteditable');
-                  el.removeAttribute('fdprocessedid');
+                  bad.forEach(function(a){el.removeAttribute(a)});
+                });
+                document.querySelectorAll('a[style],button[style],input[style]').forEach(function(el) {
                   el.removeAttribute('style');
                 });
                 new MutationObserver(function(mutations) {
                   mutations.forEach(function(m) {
                     if (m.type === 'attributes') {
-                      var attr = m.attributeName;
-                      if (attr === 'contenteditable' || attr === 'fdprocessedid') {
-                        m.target.removeAttribute(attr);
+                      var a = m.attributeName;
+                      var t = m.target;
+                      if (a === 'contenteditable' || a === 'fdprocessedid') {
+                        t.removeAttribute(a);
+                      }
+                      if (a === 'style' && t.tagName && !t.getAttribute('data-keep-style')) {
+                        var tag = t.tagName.toLowerCase();
+                        if (tag === 'a' || tag === 'button' || tag === 'input') {
+                          t.removeAttribute('style');
+                        }
                       }
                     }
                   });
-                }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ['contenteditable', 'fdprocessedid'] });
+                }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ['contenteditable', 'fdprocessedid', 'style'] });
               } catch(e) {}
             `,
           }}

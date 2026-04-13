@@ -33,6 +33,7 @@ export default function ProfilePage() {
 
   // --- mount + user loading ---
   const mounted = useIsMounted();
+  const [pageLoading, setPageLoading] = useState(true);
   const [userId, setUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -90,10 +91,32 @@ export default function ProfilePage() {
       } else {
         setLoadError(result.error ?? errors.loadFailed);
       }
+      setPageLoading(false);
     });
   }, [router, errors.loadFailed]);
 
   if (!mounted) return null;
+
+  if (pageLoading) {
+    return (
+      <div className="max-w-2xl mx-auto space-y-8 animate-pulse">
+        <div className="h-8 w-48 bg-gray-800 rounded" />
+        <div className="flex items-center gap-5">
+          <div className="w-20 h-20 rounded-full bg-gray-800" />
+          <div className="space-y-2">
+            <div className="h-5 w-36 bg-gray-800 rounded" />
+            <div className="h-4 w-48 bg-gray-800 rounded" />
+          </div>
+        </div>
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-5">
+          <div className="h-5 w-40 bg-gray-800 rounded" />
+          <div className="h-12 w-full bg-gray-800 rounded-xl" />
+          <div className="h-12 w-full bg-gray-800 rounded-xl" />
+          <div className="h-12 w-full bg-gray-800 rounded-xl" />
+        </div>
+      </div>
+    );
+  }
 
   const userInitial = fullName ? fullName[0].toUpperCase() : "U";
 

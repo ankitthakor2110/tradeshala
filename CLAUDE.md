@@ -19,6 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Supabase** for auth and database (`@supabase/ssr` + `@supabase/supabase-js`)
 - **Recharts** for dashboard sparkline charts
 - **ESLint 9** flat config format (`eslint.config.mjs`)
+- **Market data providers:** Dhan (primary) and Upstox (fallback), accessed via server-side API routes only — never call providers from the browser
 
 ## Important Notes
 
@@ -39,20 +40,46 @@ All user-visible strings, labels, mock data, and content live in config files un
 - `src/config/auth.ts` — auth form labels, error messages, validation messages, blocked email domains
 - `src/config/dashboard.ts` — sidebar nav items, navbar titles, market hours, greeting text, mock market data, labels
 - `src/config/legal.ts` — terms and privacy content
+- `src/config/trade.ts` — instrument types, order types, simulation params (slippage, brokerage), popular stocks/indices
+- `src/config/admin.ts` — admin email gate + `isAdmin(email)` helper; lists admin-restricted pages
 
 ### Supabase Integration
 
 - **Client-side:** `src/lib/supabase/client.ts` — browser client via `createBrowserClient`
 - **Server-side:** `src/lib/supabase/server.ts` — server client via `createServerClient` (uses `cookies()`)
-- **Middleware:** `src/proxy.ts` exports the middleware function; calls `src/lib/supabase/middleware.ts` to refresh sessions and protect routes (`/dashboard`, `/portfolio`, `/trades`, `/watchlist` redirect to `/login` if unauthenticated)
-- **Env vars required:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (see `.env.local.example`)
-- **Database types:** `src/types/database.ts` — typed `Database` interface for tables: `profiles`, `portfolios`, `trades`, `watchlist`
+- **Middleware:** `src/proxy.ts` exports the middleware function; calls `src/lib/supabase/middleware.ts` to refresh sessions, protect routes (`/dashboard`, `/portfolio`, `/trades`, `/watchlist` redirect to `/login`), and gate admin-only routes (`/connection-status`) on server-side `ADMIN_EMAIL` env match (non-admins are bounced to `/dashboard?error=unauthorized`)
+- **Env vars required:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ADMIN_EMAIL` (server) and `NEXT_PUBLIC_ADMIN_EMAIL` (client, used by `useAdmin` hook) — keep them equal. Broker/market-data keys (e.g. `DHAN_*`, `UPSTOX_*`) live server-side only. See `.env.local.example`.
+- **Database types:** `src/types/database.ts` — typed `Database` interface for tables: `profiles`, `portfolios`, `trades`, `watchlist`, `holdings`, `broker_connections`. The `orders` and `positions` tables exist in the DB (used by the trade engine) but are typed inline via `Order` / `Position` interfaces rather than listed in the `Database` schema — cast inserts with `as never` when writing to them (see `trade-engine.service.ts`).
+
+### API Routes (`src/app/api/`)
+
+All provider/broker I/O and any access to server-only env vars must happen in route handlers — never call providers directly from client components. Existing routes:
+- `api/market-data/{indices,quote,gainers-losers,search,health}` — read-only market data
+- `api/trade/{expiries,option-chain}` — derivatives data for the trade simulator
+- `api/broker/*` — broker OAuth / connection flows (Upstox, Zerodha)
+- `api/admin/env-status` — admin-only diagnostics, consumed by `/connection-status`
+
+Client code reaches these via helpers in `src/services/market-data.service.ts` (thin `fetch` wrappers that return typed shapes).
+
+### Market Data Provider Layer (`src/lib/market-data/`)
+
+- `dhan.ts` and `upstox.ts` each expose the same surface: `isXConfigured()`, `testConnection()`, `fetchQuote`, `fetchIndices`, `fetchGainersLosers`, `searchStocks`.
+- `index.ts` picks a primary provider based on which keys are configured (Dhan preferred) and falls back to the other if the primary returns empty. Every response is tagged with a `source: "dhan" | "upstox" | "unavailable"` so UI can render the `LiveBadge` accurately.
+- When adding a new provider, add a module that implements this same surface, then wire it into `index.ts` — do not bypass the aggregator.
 
 ### Service Layer
 
-Business logic lives in `src/services/`, not in components:
+Business logic lives in `src/services/`, not in components or route handlers. Route handlers orchestrate; services hold the rules.
 - `src/services/auth.service.ts` — signUp, signIn, signOut, getCurrentUser, sendPasswordReset, resetPassword
 - `src/services/dashboard.service.ts` — getMarketStatus (IST market hours), getGreeting, getPortfolioStats
+- `src/services/market-data.service.ts` — client-side fetchers that call `/api/market-data/*`
+- `src/services/trade-engine.service.ts` — order validation, fill simulation (slippage + brokerage from `TRADE_CONFIG.simulation`), position upsert/close, P&L math. Writes to `orders` + `positions` and calls the Postgres RPCs `deduct_virtual_cash` / `add_virtual_cash` to move the user's `virtual_balance`. MARKET orders fill instantly; LIMIT/SL/SL-M stay `PENDING` until price condition is met.
+
+### Admin Gating
+
+Two layers, both required:
+1. **Server (middleware):** `ADMIN_EMAIL` env check in `src/lib/supabase/middleware.ts` — the security boundary.
+2. **Client (`src/hooks/useAdmin.ts` + `src/config/admin.ts`):** `NEXT_PUBLIC_ADMIN_EMAIL` — used only to hide/show UI (e.g. the "Connection Status" sidebar item). Never rely on this for authorization.
 
 ### Type System
 
@@ -65,10 +92,15 @@ Types are split by domain under `src/types/`:
 
 - `src/utils/validation.ts` — email, password, full name validators (uses rules from `authConfig`)
 - `src/utils/colors.ts` — P&L color helpers (`getPnLColor`, `getPnLBgColor`, `formatPnL`)
+- `src/utils/format.ts` — `timeAgo` and `formatOI` (Cr/L/K compaction for Indian number formatting)
 - `src/styles/interactions.ts` — `INTERACTION_CLASSES` object with pre-built Tailwind class strings for buttons, links, cards, inputs
 - `src/context/LoadingContext.tsx` — `LoadingProvider` / `useLoading` context for global loading state
+- `src/components/ui/LiveBadge.tsx` — renders data-source pill (dhan/upstox/unavailable) on market widgets
+- `src/components/ui/Skeleton.tsx` — loading placeholder used by data-fetching pages (see Loader Rules in `CLAUDE_RULES.md`)
 
 ## UI & Interaction Rules
+
+The full rulebook (cursors, loaders, sidebar dimensions, per-element hover/active requirements) is in `CLAUDE_RULES.md` at the repo root — read it before building UI. Summary:
 
 All interactive elements **must** use classes from `INTERACTION_CLASSES` (`src/styles/interactions.ts`). Key requirements:
 - Every button needs `cursor-pointer`, hover state, `active:scale-95`, disabled states

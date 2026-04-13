@@ -10,9 +10,9 @@ export const dashboardConfig = {
     items: [
       { label: "Dashboard", href: "/dashboard", icon: "grid" },
       { label: "Portfolio", href: "/dashboard/portfolio", icon: "briefcase" },
-      { label: "Trades", href: "/dashboard/trades", icon: "activity" },
+      { label: "Trade", href: "/dashboard/trade", icon: "trade" },
       { label: "Watchlist", href: "/dashboard/watchlist", icon: "eye" },
-      { label: "Broker", href: "/dashboard/broker", icon: "link" },
+      { label: "Data & Brokers", href: "/dashboard/broker", icon: "link", visible: false },
       { label: "Profile", href: "/dashboard/profile", icon: "user" },
     ] as SidebarItem[],
     settingsLabel: "Settings",
@@ -24,6 +24,7 @@ export const dashboardConfig = {
     pageTitles: {
       "/dashboard": "Dashboard",
       "/dashboard/portfolio": "Portfolio",
+      "/dashboard/trade": "Trade Simulator",
       "/dashboard/trades": "Trades",
       "/dashboard/watchlist": "Watchlist",
       "/dashboard/settings": "Settings",

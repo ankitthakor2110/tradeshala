@@ -42,7 +42,7 @@ export default function FormInput({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          className={`w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3.5 text-white placeholder-gray-600 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/50 transition-all duration-200 ${
+          className={`w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3.5 text-white placeholder-gray-600 cursor-text focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/50 transition-all duration-200 ${
             showPasswordToggle ? "pr-12" : ""
           } ${error ? "border-red-500 focus:border-red-500 focus:ring-red-500/50" : ""}`}
         />

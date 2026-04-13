@@ -156,10 +156,117 @@ export interface DashboardStats {
   totalPnLPercent: number;
 }
 
+export interface Order {
+  id: string;
+  user_id: string;
+  symbol: string;
+  exchange: string;
+  instrument_type: "EQ" | "CE" | "PE" | "FUT";
+  company_name: string | null;
+  option_type: "CE" | "PE" | null;
+  strike_price: number | null;
+  expiry_date: string | null;
+  lot_size: number;
+  order_type: "MARKET" | "LIMIT" | "SL" | "SL-M";
+  trade_type: "BUY" | "SELL";
+  quantity: number;
+  price: number | null;
+  trigger_price: number | null;
+  status: "PENDING" | "EXECUTED" | "CANCELLED" | "REJECTED";
+  executed_price: number | null;
+  executed_quantity: number | null;
+  executed_at: string | null;
+  simulated_bid: number | null;
+  simulated_ask: number | null;
+  slippage: number;
+  brokerage: number;
+  strategy_id: string | null;
+  strategy_name: string | null;
+  notes: string | null;
+  tags: string[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Position {
+  id: string;
+  user_id: string;
+  symbol: string;
+  exchange: string;
+  instrument_type: string;
+  company_name: string | null;
+  option_type: string | null;
+  strike_price: number | null;
+  expiry_date: string | null;
+  lot_size: number;
+  quantity: number;
+  average_price: number;
+  total_invested: number;
+  current_price: number | null;
+  current_value: number | null;
+  pnl: number;
+  pnl_percent: number;
+  day_pnl: number;
+  status: "OPEN" | "CLOSED";
+  opened_at: string;
+  closed_at: string | null;
+  updated_at: string;
+}
+
+export interface OrderFormData {
+  symbol: string;
+  exchange: string;
+  instrument_type: "EQ" | "CE" | "PE";
+  option_type: "CE" | "PE" | null;
+  strike_price: number | null;
+  expiry_date: string | null;
+  lot_size: number;
+  order_type: "MARKET" | "LIMIT" | "SL" | "SL-M";
+  trade_type: "BUY" | "SELL";
+  quantity: number;
+  price: number | null;
+  trigger_price: number | null;
+  notes: string | null;
+}
+
+export interface OptionLeg {
+  ltp: number;
+  change: number;
+  changePercent: number;
+  bid: number;
+  ask: number;
+  bidAskSpread: number;
+  oi: number;
+  oiChange: number;
+  oiChangePercent: number;
+  volume: number;
+  iv: number;
+  delta: number;
+  theta: number;
+}
+
+export interface OptionChainData {
+  strike_price: number;
+  ce: OptionLeg;
+  pe: OptionLeg;
+  pcr: number;
+  totalCeOI: number;
+  totalPeOI: number;
+}
+
+export interface SimulatedFill {
+  executed_price: number;
+  slippage: number;
+  brokerage: number;
+  total_charges: number;
+  net_price: number;
+}
+
 export interface SidebarItem {
   label: string;
   href: string;
   icon: string;
+  visible?: boolean;
 }
 
 export interface Database {

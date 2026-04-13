@@ -1,36 +1,81 @@
-import type { MarketData } from "@/types/database";
-import { getMarketStatus } from "@/services/dashboard.service";
+import type { MarketData, StockGainerLoser } from "@/types/database";
 
-export async function getLivePrice(
-  symbol: string,
-  exchange: string = "NSE"
-): Promise<MarketData | null> {
+interface IndicesResponse {
+  nifty50: MarketData | null;
+  bankNifty: MarketData | null;
+  source: string;
+  last_updated: string;
+}
+
+interface GainersLosersResponse {
+  gainers: StockGainerLoser[];
+  losers: StockGainerLoser[];
+  source: string;
+}
+
+interface SearchResult {
+  symbol: string;
+  company_name: string;
+  exchange: string;
+  instrument_type: string;
+}
+
+export async function getIndicesData(): Promise<IndicesResponse | null> {
   try {
-    const res = await fetch(
-      `/api/broker/market-data?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}`
-    );
-
+    const res = await fetch("/api/market-data/indices");
     if (!res.ok) return null;
-
-    return (await res.json()) as MarketData;
+    return await res.json();
   } catch {
     return null;
   }
 }
 
-export async function getNiftyData(): Promise<MarketData | null> {
-  return getLivePrice("^NSEI", "NSE");
+export async function getStockQuote(
+  symbol: string,
+  exchange: string = "NSE"
+): Promise<MarketData | null> {
+  try {
+    const res = await fetch(
+      `/api/market-data/quote?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}`
+    );
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
-export async function getBankNiftyData(): Promise<MarketData | null> {
-  return getLivePrice("^NSEBANK", "NSE");
+export async function getGainersLosers(): Promise<GainersLosersResponse | null> {
+  try {
+    const res = await fetch("/api/market-data/gainers-losers");
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function searchStocks(
+  query: string
+): Promise<SearchResult[]> {
+  try {
+    if (!query || query.trim().length < 1) return [];
+    const res = await fetch(
+      `/api/market-data/search?q=${encodeURIComponent(query.trim())}`
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.results ?? [];
+  } catch {
+    return [];
+  }
 }
 
 export async function getMultipleStockPrices(
   symbols: string[]
 ): Promise<MarketData[]> {
   const results = await Promise.allSettled(
-    symbols.map((s) => getLivePrice(s))
+    symbols.map((s) => getStockQuote(s))
   );
 
   return results
@@ -39,32 +84,4 @@ export async function getMultipleStockPrices(
         r.status === "fulfilled" && r.value !== null
     )
     .map((r) => r.value!);
-}
-
-export function subscribeToLiveUpdates(
-  symbols: string[],
-  callback: (data: MarketData[]) => void
-): () => void {
-  let active = true;
-
-  async function poll() {
-    if (!active) return;
-
-    if (getMarketStatus()) {
-      const data = await getMultipleStockPrices(symbols);
-      if (active && data.length > 0) {
-        callback(data);
-      }
-    }
-
-    if (active) {
-      setTimeout(poll, 5000);
-    }
-  }
-
-  poll();
-
-  return () => {
-    active = false;
-  };
 }

@@ -13,11 +13,10 @@ export default function BrandLogo({ className = "" }: BrandLogoProps) {
   return (
     <Link
       href={homeUrl}
-      className={`cursor-pointer hover:opacity-80 transition-opacity duration-200 ${className}`}
+      className={`flex items-center cursor-pointer hover:opacity-80 transition-opacity duration-200 ${className}`}
     >
-      <span className="text-xl font-bold text-white">
-        Trade<span className="text-violet-400">Shala</span>
-      </span>
+      <span className="text-xl font-bold text-white">Trade</span>
+      <span className="text-xl font-bold text-violet-400">Shala</span>
     </Link>
   );
 }

@@ -2,8 +2,6 @@ export const authConfig = {
   blockedEmailDomains: ["yopmail.com", "mailinator.com", "dispostable.com"],
 
   loginPanel: {
-    brandLabel: "TradeShala",
-    proBadge: "PRO",
     headlines: ["Track Markets.", "Trade Smarter.", "Win Consistently."],
     subtext:
       "India's most powerful paper trading platform. Practice with virtual funds, master strategies, and build confidence before entering real markets.",
