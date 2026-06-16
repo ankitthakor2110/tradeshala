@@ -26,7 +26,6 @@ export const authConfig = {
     emailPlaceholder: "you@example.com",
     passwordLabel: "Password",
     passwordPlaceholder: "Enter your password",
-    rememberMeLabel: "Remember me",
     forgotPasswordText: "Forgot Password?",
     forgotPasswordHref: "/forgot-password",
     submitButton: "Sign In",

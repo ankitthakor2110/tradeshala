@@ -21,7 +21,6 @@ export default function LoginForm() {
   const [form, setForm] = useState<LoginFormData>({
     email: "",
     password: "",
-    rememberMe: false,
   });
 
   const [fieldErrors, setFieldErrors] = useState<{
@@ -167,18 +166,7 @@ export default function LoginForm() {
               onTogglePassword={() => setShowPassword(!showPassword)}
             />
 
-            <div className="flex items-center justify-between">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.rememberMe}
-                  onChange={(e) => updateField("rememberMe", e.target.checked)}
-                  className="w-4 h-4 rounded border-gray-700 bg-gray-800 text-violet-500 focus:ring-2 focus:ring-violet-500/50 focus:ring-offset-0 cursor-pointer transition-colors duration-200"
-                />
-                <span className="text-sm text-gray-400">
-                  {login.rememberMeLabel}
-                </span>
-              </label>
+            <div className="flex items-center justify-end">
               <Link
                 href={login.forgotPasswordHref}
                 className="text-sm text-violet-400 hover:text-violet-300 hover:underline underline-offset-4 cursor-pointer transition-colors duration-200"
