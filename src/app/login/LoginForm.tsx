@@ -14,7 +14,9 @@ export default function LoginForm() {
   const { login, errors, loading, success, loginPanel, securityText } = authConfig;
   const router = useRouter();
   const searchParams = useSearchParams();
-  const signupSuccess = searchParams.get("signup") === "success";
+  const signupParam = searchParams.get("signup");
+  const signupSuccess = signupParam === "success";
+  const emailConfirmed = signupParam === "confirmed";
 
   const [form, setForm] = useState<LoginFormData>({
     email: "",
@@ -129,6 +131,12 @@ export default function LoginForm() {
           {signupSuccess && (
             <div className="mb-5 p-3 bg-violet-500/10 border border-violet-500/20 rounded-lg text-sm text-violet-400">
               {success.signupComplete}
+            </div>
+          )}
+
+          {emailConfirmed && (
+            <div className="mb-5 p-3 bg-violet-500/10 border border-violet-500/20 rounded-lg text-sm text-violet-400">
+              {success.emailConfirmed}
             </div>
           )}
 

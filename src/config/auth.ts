@@ -124,5 +124,7 @@ export const authConfig = {
   success: {
     signupComplete:
       "Account created successfully! Please check your email to verify, then sign in.",
+    emailConfirmed:
+      "Email confirmed! You can now sign in to your account.",
   },
 } as const;

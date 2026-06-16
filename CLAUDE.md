@@ -41,6 +41,8 @@ All user-visible strings, labels, mock data, and content live in config files un
 - `src/config/dashboard.ts` — sidebar nav items, navbar titles, market hours, greeting text, mock market data, labels
 - `src/config/legal.ts` — terms and privacy content
 - `src/config/trade.ts` — instrument types, order types, simulation params (slippage, brokerage), popular stocks/indices
+- `src/config/portfolio.ts` / `positions.ts` / `watchlist.ts` / `profile.ts` — page titles, section/tab labels, table headers, and refresh intervals for the respective dashboard pages
+- `src/config/brokers.ts` — `BROKERS` list (Upstox, Zerodha): per-broker auth type, OAuth redirect URI, credential fields, and setup steps rendered by `/dashboard/broker`
 - `src/config/admin.ts` — admin email gate + `isAdmin(email)` helper; lists admin-restricted pages
 
 ### Supabase Integration
@@ -73,6 +75,7 @@ Business logic lives in `src/services/`, not in components or route handlers. Ro
 - `src/services/auth.service.ts` — signUp, signIn, signOut, getCurrentUser, sendPasswordReset, resetPassword
 - `src/services/dashboard.service.ts` — getMarketStatus (IST market hours), getGreeting, getPortfolioStats
 - `src/services/market-data.service.ts` — client-side fetchers that call `/api/market-data/*`
+- `src/services/broker.service.ts` — broker-connection CRUD against the `broker_connections` table (get active/all connections, connect/test) via the browser Supabase client
 - `src/services/trade-engine.service.ts` — order validation, fill simulation (slippage + brokerage from `TRADE_CONFIG.simulation`), position upsert/close, P&L math. Writes to `orders` + `positions` and calls the Postgres RPCs `deduct_virtual_cash` / `add_virtual_cash` to move the user's `virtual_balance`. MARKET orders fill instantly; LIMIT/SL/SL-M stay `PENDING` until price condition is met.
 
 ### Admin Gating
@@ -88,11 +91,19 @@ Types are split by domain under `src/types/`:
 - `database.ts` — Supabase row types (`Profile`, `Portfolio`, `Trade`, `WatchlistItem`) and the `Database` schema type
 - `landing.ts` — landing page config types
 
+### Hooks (`src/hooks/`)
+
+- `useAdmin.ts` — client-side admin UI gate (reads `NEXT_PUBLIC_ADMIN_EMAIL`; UI-only, never authorization)
+- `useAuthRedirect.ts` — redirects based on auth state
+- `useBrokerConnection.ts` — derives active-broker connection state (connected, expiry/expiring-soon) from `broker.service.ts`
+- `useIsMounted.ts` — the mounted-state helper used to avoid hydration mismatches (see Hydration Rules)
+
 ### Shared Utilities
 
 - `src/utils/validation.ts` — email, password, full name validators (uses rules from `authConfig`)
 - `src/utils/colors.ts` — P&L color helpers (`getPnLColor`, `getPnLBgColor`, `formatPnL`)
 - `src/utils/format.ts` — `timeAgo` and `formatOI` (Cr/L/K compaction for Indian number formatting)
+- `src/utils/broker.utils.ts` — broker connection/token helpers (e.g. expiry computation) used by `useBrokerConnection`
 - `src/styles/interactions.ts` — `INTERACTION_CLASSES` object with pre-built Tailwind class strings for buttons, links, cards, inputs
 - `src/context/LoadingContext.tsx` — `LoadingProvider` / `useLoading` context for global loading state
 - `src/components/ui/LiveBadge.tsx` — renders data-source pill (dhan/upstox/unavailable) on market widgets

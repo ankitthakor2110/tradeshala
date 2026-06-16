@@ -20,6 +20,7 @@ export async function signUp(
       password,
       options: {
         data: { full_name: fullName },
+        emailRedirectTo: window.location.origin + "/login?signup=confirmed",
       },
     });
 
