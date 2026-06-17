@@ -1,10 +1,13 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useIsMounted } from "@/hooks/useIsMounted";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { searchStocks } from "@/services/market-data.service";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { WATCHLIST_CONFIG } from "@/config/watchlist";
+import { formatIndianCurrency, formatPercent } from "@/utils/format";
+import { getPnLColor } from "@/utils/colors";
 
 interface WatchlistEntry {
   symbol: string;
@@ -51,6 +54,15 @@ export default function WatchlistPage() {
   const [confirmRemoveKey, setConfirmRemoveKey] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Live prices for watched symbols via Supabase Realtime. A symbol shows a
+  // price when it's in the streamed universe (indices + popular equities +
+  // held/traded symbols).
+  const watchedSymbols = useMemo(
+    () => watchlist.map((e) => e.symbol),
+    [watchlist]
+  );
+  const { quotes: liveQuotes } = useLiveQuotes(watchedSymbols);
+
   // Load persisted watchlist on mount
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only localStorage hydration
@@ -68,6 +80,7 @@ export default function WatchlistPage() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const trimmed = query.trim();
     if (trimmed.length < WATCHLIST_CONFIG.search.minChars) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- resetting search state on cleared query
       setResults([]);
       setSearching(false);
       return;
@@ -281,6 +294,7 @@ export default function WatchlistPage() {
               {watchlist.map((e) => {
                 const key = makeKey(e);
                 const isConfirming = confirmRemoveKey === key;
+                const q = liveQuotes[e.symbol];
                 return (
                   <div
                     key={key}
@@ -299,6 +313,16 @@ export default function WatchlistPage() {
                         {e.company_name}
                       </p>
                     </div>
+                    {q && (
+                      <div className="text-right shrink-0 tabular-nums">
+                        <div className="text-sm font-semibold text-white">
+                          {formatIndianCurrency(q.ltp)}
+                        </div>
+                        <div className={`text-xs ${getPnLColor(q.change)}`}>
+                          {formatPercent(q.change_percent)}
+                        </div>
+                      </div>
+                    )}
                     {isConfirming ? (
                       <div className="flex items-center gap-2 shrink-0">
                         <span className="hidden sm:inline text-xs text-gray-400">

@@ -29,6 +29,28 @@ export const TRADE_CONFIG = {
     maxSlippage: 0.1,
   },
 
+  // Approximate Indian statutory charges, as fractions of turnover, used to make
+  // simulated fills feel like a real contract note. GST applies on
+  // (brokerage + txn + sebi). Values are estimates for a paper-trading sim.
+  charges: {
+    equity: {
+      sttBuy: 0.001,
+      sttSell: 0.001,
+      txn: 0.0000297,
+      sebi: 0.000001,
+      stampBuy: 0.00015,
+      gst: 0.18,
+    },
+    option: {
+      sttBuy: 0,
+      sttSell: 0.001,
+      txn: 0.0003503,
+      sebi: 0.000001,
+      stampBuy: 0.00003,
+      gst: 0.18,
+    },
+  },
+
   defaultLotSizes: {
     NIFTY: 50,
     BANKNIFTY: 15,

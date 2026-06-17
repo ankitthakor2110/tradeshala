@@ -1,6 +1,19 @@
 import type { MarketData, StockGainerLoser } from "@/types/database";
+import { MOVERS_BASKET } from "./instruments";
+import { searchInstruments, resolveEquityKey } from "./upstox-instruments";
 
 const UPSTOX_BASE = "https://api.upstox.com/v2";
+
+// Indices use name-based instrument keys; everything else is an ISIN-based
+// equity key resolved via the instrument master.
+const INDEX_INSTRUMENT_KEYS: Record<string, string> = {
+  NIFTY: "NSE_INDEX|Nifty 50",
+  "NIFTY 50": "NSE_INDEX|Nifty 50",
+  BANKNIFTY: "NSE_INDEX|Nifty Bank",
+  "BANK NIFTY": "NSE_INDEX|Nifty Bank",
+  FINNIFTY: "NSE_INDEX|Nifty Fin Service",
+  SENSEX: "BSE_INDEX|SENSEX",
+};
 const CACHE_TTL = 5000;
 
 interface CacheEntry<T> { data: T; timestamp: number }
@@ -115,10 +128,18 @@ export async function fetchQuote(symbol: string): Promise<MarketData | null> {
   const headers = getHeaders();
   if (!headers) return null;
 
+  // Resolve the instrument key: indices use name keys; equities are ISIN-based
+  // (Upstox rejects NSE_EQ|<symbol>), so resolve via the instrument master.
+  const indexKey = INDEX_INSTRUMENT_KEYS[symbol.toUpperCase()];
+  const instrumentKey = indexKey ?? (await resolveEquityKey(symbol));
+  if (!instrumentKey) return null;
+  const exchange = instrumentKey.startsWith("BSE") ? "BSE" : "NSE";
+
   try {
-    const instrumentKey = `NSE_EQ|${symbol}`;
+    // Full quote gives ohlc + net_change, so change/change% are accurate even
+    // after hours (the LTP endpoint omits previous close).
     const res = await fetch(
-      `${UPSTOX_BASE}/market-quote/ltp?instrument_key=${encodeURIComponent(instrumentKey)}`,
+      `${UPSTOX_BASE}/market-quote/quotes?instrument_key=${encodeURIComponent(instrumentKey)}`,
       { headers }
     );
 
@@ -126,22 +147,24 @@ export async function fetchQuote(symbol: string): Promise<MarketData | null> {
     if (!res.ok) return null;
 
     const data = await res.json();
-    // Upstox returns keys with colon separator: NSE_EQ:SYMBOL
-    const responseKey = `NSE_EQ:${symbol}`;
-    const quote = data?.data?.[responseKey] ?? data?.data?.[instrumentKey];
-    if (!quote) return null;
+    // Single instrument requested → take the one entry (response is keyed by
+    // EXCHANGE:TRADINGSYMBOL, which differs from the ISIN key we sent).
+    const entries = data?.data ? Object.values(data.data as Record<string, unknown>) : [];
+    const raw = entries[0] as Record<string, unknown> | undefined;
+    if (!raw) return null;
 
-    const lastPrice = quote.last_price ?? 0;
-    const closePrice = quote.close_price ?? 0;
-    const change = lastPrice - closePrice;
-    const changePct = closePrice ? (change / closePrice) * 100 : 0;
+    const ohlc = (raw.ohlc as Record<string, number> | undefined) ?? {};
+    const lastPrice = (raw.last_price as number) ?? 0;
+    const netChange = (raw.net_change as number) ?? 0;
+    const prevClose = lastPrice - netChange;
+    const changePct = prevClose ? (netChange / prevClose) * 100 : 0;
 
     const result: MarketData = {
-      symbol, exchange: "NSE", last_price: lastPrice,
-      open_price: quote.open_price ?? 0, high_price: quote.high_price ?? 0,
-      low_price: quote.low_price ?? 0, close_price: closePrice,
-      change, change_percent: changePct,
-      volume: quote.volume ?? 0, last_updated: new Date().toISOString(),
+      symbol, exchange, last_price: lastPrice,
+      open_price: ohlc.open ?? 0, high_price: ohlc.high ?? 0,
+      low_price: ohlc.low ?? 0, close_price: prevClose,
+      change: netChange, change_percent: changePct,
+      volume: (raw.volume as number) ?? 0, last_updated: new Date().toISOString(),
     };
 
     setCache(cacheKey, result);
@@ -154,21 +177,26 @@ export async function fetchQuote(symbol: string): Promise<MarketData | null> {
 export async function fetchIndices(): Promise<{
   nifty50: MarketData | null;
   bankNifty: MarketData | null;
+  sensex: MarketData | null;
 } | null> {
   const cacheKey = "upstox:indices";
-  const cached = getCached<{ nifty50: MarketData | null; bankNifty: MarketData | null }>(cacheKey);
+  const cached = getCached<{ nifty50: MarketData | null; bankNifty: MarketData | null; sensex: MarketData | null }>(cacheKey);
   if (cached) return cached;
 
   const headers = getHeaders();
   if (!headers) return null;
 
   try {
-    const niftyInstrument = "NSE_INDEX|Nifty 50";
-    const bankInstrument = "NSE_INDEX|Nifty Bank";
-    const keys = [niftyInstrument, bankInstrument].map(encodeURIComponent).join(",");
+    const wanted = [
+      { key: "NSE_INDEX|Nifty 50", name: "NIFTY 50", exchange: "NSE" },
+      { key: "NSE_INDEX|Nifty Bank", name: "BANK NIFTY", exchange: "NSE" },
+      { key: "BSE_INDEX|SENSEX", name: "SENSEX", exchange: "BSE" },
+    ];
+    const keys = wanted.map((w) => encodeURIComponent(w.key)).join(",");
 
+    // Full quote (not LTP) so index change/% are accurate via net_change.
     const res = await fetch(
-      `${UPSTOX_BASE}/market-quote/ltp?instrument_key=${keys}`,
+      `${UPSTOX_BASE}/market-quote/quotes?instrument_key=${keys}`,
       { headers }
     );
 
@@ -176,29 +204,31 @@ export async function fetchIndices(): Promise<{
     if (!res.ok) return null;
 
     const data = await res.json();
-    const quotes = data?.data;
+    const quotes = data?.data as Record<string, Record<string, unknown>> | undefined;
     if (!quotes) return null;
 
-    // Upstox returns colon-separated keys: NSE_INDEX:Nifty 50
-    const niftyKey = "NSE_INDEX:Nifty 50";
-    const bankKey = "NSE_INDEX:Nifty Bank";
-
-    function buildIndex(raw: Record<string, number> | undefined, name: string): MarketData | null {
+    function buildIndex(raw: Record<string, unknown> | undefined, name: string, exchange: string): MarketData | null {
       if (!raw) return null;
-      const lp = raw.last_price ?? 0;
-      const cl = raw.close_price ?? 0;
+      const ohlc = (raw.ohlc as Record<string, number> | undefined) ?? {};
+      const lp = (raw.last_price as number) ?? 0;
+      const nc = (raw.net_change as number) ?? 0;
+      const prevClose = lp - nc;
       return {
-        symbol: name, exchange: "NSE", last_price: lp,
-        open_price: raw.open_price ?? 0, high_price: raw.high_price ?? 0,
-        low_price: raw.low_price ?? 0, close_price: cl,
-        change: lp - cl, change_percent: cl ? ((lp - cl) / cl) * 100 : 0,
-        volume: raw.volume ?? 0, last_updated: new Date().toISOString(),
+        symbol: name, exchange, last_price: lp,
+        open_price: ohlc.open ?? 0, high_price: ohlc.high ?? 0,
+        low_price: ohlc.low ?? 0, close_price: prevClose,
+        change: nc, change_percent: prevClose ? (nc / prevClose) * 100 : 0,
+        volume: (raw.volume as number) ?? 0, last_updated: new Date().toISOString(),
       };
     }
 
+    // Upstox echoes keys in colon form (NSE_INDEX:Nifty 50); match by that.
+    const find = (key: string) => quotes[key.replace("|", ":")] ?? quotes[key];
+
     const result = {
-      nifty50: buildIndex(quotes[niftyKey] ?? quotes[niftyInstrument], "NIFTY 50"),
-      bankNifty: buildIndex(quotes[bankKey] ?? quotes[bankInstrument], "BANK NIFTY"),
+      nifty50: buildIndex(find(wanted[0].key), wanted[0].name, wanted[0].exchange),
+      bankNifty: buildIndex(find(wanted[1].key), wanted[1].name, wanted[1].exchange),
+      sensex: buildIndex(find(wanted[2].key), wanted[2].name, wanted[2].exchange),
     };
 
     setCache(cacheKey, result);
@@ -219,30 +249,48 @@ export async function fetchGainersLosers(): Promise<{
   const headers = getHeaders();
   if (!headers) return null;
 
+  // Upstox has no top-movers endpoint, so we compute movers from a fixed basket
+  // of liquid NIFTY constituents using the full-quote endpoint. `net_change` is
+  // the day's change (reliable even when the market is closed, unlike deriving
+  // it from ohlc.close which equals last_price after hours).
   try {
+    const keys = MOVERS_BASKET.map(encodeURIComponent).join(",");
     const res = await fetch(
-      `${UPSTOX_BASE}/market-quote/market-status/NSE`,
+      `${UPSTOX_BASE}/market-quote/quotes?instrument_key=${keys}`,
       { headers }
     );
 
-    if (res.status === 401 || res.status === 403) return null;
     if (!res.ok) return null;
 
     const data = await res.json();
+    const quotes = data?.data as Record<string, Record<string, unknown>> | undefined;
+    if (!quotes) return null;
 
-    const mapMovers = (items: Record<string, unknown>[], positive: boolean): StockGainerLoser[] =>
-      (items ?? []).slice(0, 5).map((item) => ({
-        symbol: ((item.symbol as string) ?? "").replace("NSE_EQ|", ""),
-        change: Math.abs((item.net_change as number) ?? (item.change as number) ?? 0),
-        changePercent: Math.abs((item.percentage_change as number) ?? (item.change_percent as number) ?? 0),
-        isPositive: positive,
-      }));
+    const movers: { symbol: string; change: number; changePercent: number }[] = [];
+    for (const [respKey, raw] of Object.entries(quotes)) {
+      // Response keys come back as "NSE_EQ:<TRADINGSYMBOL>".
+      const symbol = respKey.split(":")[1] ?? respKey;
+      const lastPrice = (raw.last_price as number) ?? 0;
+      const netChange = (raw.net_change as number) ?? 0;
+      const prevClose = lastPrice - netChange;
+      const changePercent = prevClose ? (netChange / prevClose) * 100 : 0;
+      if (netChange === 0) continue;
+      movers.push({ symbol, change: netChange, changePercent });
+    }
 
-    const result = {
-      gainers: mapMovers(data?.data?.top_gainers ?? [], true),
-      losers: mapMovers(data?.data?.top_losers ?? [], false),
-    };
+    const gainers = movers
+      .filter((m) => m.change > 0)
+      .sort((a, b) => b.changePercent - a.changePercent)
+      .slice(0, 5)
+      .map((m) => ({ symbol: m.symbol, change: m.change, changePercent: m.changePercent, isPositive: true }));
 
+    const losers = movers
+      .filter((m) => m.change < 0)
+      .sort((a, b) => a.changePercent - b.changePercent)
+      .slice(0, 5)
+      .map((m) => ({ symbol: m.symbol, change: Math.abs(m.change), changePercent: Math.abs(m.changePercent), isPositive: false }));
+
+    const result = { gainers, losers };
     setCache(cacheKey, result);
     return result;
   } catch {
@@ -250,30 +298,101 @@ export async function fetchGainersLosers(): Promise<{
   }
 }
 
+export interface UniverseEntry {
+  symbol: string;       // display symbol the UI subscribes by, e.g. "NIFTY 50", "RELIANCE"
+  instrumentKey: string; // Upstox instrument key, e.g. "NSE_INDEX|Nifty 50", "NSE_EQ|RELIANCE"
+  exchange: string;
+}
+
+export interface BatchQuote {
+  symbol: string;
+  exchange: string;
+  ltp: number;
+  prev_close: number;
+  change: number;
+  change_percent: number;
+  volume: number;
+}
+
+const LTP_MAX_KEYS = 500; // Upstox allows up to 500 instrument keys per request
+
+/**
+ * Fetches last-traded prices for many instruments in batched requests.
+ * Mirrors the response parsing used by `fetchIndices` (Upstox returns keys
+ * with a colon separator, e.g. "NSE_EQ:RELIANCE"). Returns one row per
+ * instrument that resolved, keyed by the caller's display `symbol`.
+ */
+export async function fetchLtpBatch(
+  entries: UniverseEntry[]
+): Promise<BatchQuote[]> {
+  const headers = getHeaders();
+  if (!headers || entries.length === 0) return [];
+
+  const out: BatchQuote[] = [];
+
+  for (let i = 0; i < entries.length; i += LTP_MAX_KEYS) {
+    const chunk = entries.slice(i, i + LTP_MAX_KEYS);
+    const keys = chunk.map((e) => encodeURIComponent(e.instrumentKey)).join(",");
+
+    try {
+      // Full quote so change/% are accurate. Equity responses are keyed by
+      // trading symbol, not the ISIN key we send, so match by instrument_token.
+      const res = await fetch(
+        `${UPSTOX_BASE}/market-quote/quotes?instrument_key=${keys}`,
+        { headers }
+      );
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      const quotes = data?.data as Record<string, Record<string, unknown>> | undefined;
+      if (!quotes) continue;
+
+      const byToken = new Map<string, Record<string, unknown>>();
+      for (const raw of Object.values(quotes)) {
+        const token = raw.instrument_token as string | undefined;
+        if (token) byToken.set(token, raw);
+      }
+
+      for (const entry of chunk) {
+        const raw =
+          byToken.get(entry.instrumentKey) ??
+          quotes[entry.instrumentKey.replace("|", ":")] ??
+          quotes[entry.instrumentKey];
+        if (!raw) continue;
+
+        const ohlc = (raw.ohlc as Record<string, number> | undefined) ?? {};
+        const ltp = (raw.last_price as number) ?? 0;
+        const netChange = (raw.net_change as number) ?? 0;
+        const prevClose = ltp - netChange;
+
+        out.push({
+          symbol: entry.symbol,
+          exchange: entry.exchange,
+          ltp,
+          prev_close: prevClose,
+          change: netChange,
+          change_percent: prevClose ? (netChange / prevClose) * 100 : 0,
+          volume: (raw.volume as number) ?? ohlc.volume ?? 0,
+        });
+      }
+    } catch {
+      // skip this chunk on transient failure
+    }
+  }
+
+  return out;
+}
+
 export async function searchStocks(
   query: string
 ): Promise<{ symbol: string; company_name: string; exchange: string; instrument_type: string }[]> {
-  const headers = getHeaders();
-  if (!headers) return [];
-
-  try {
-    const res = await fetch(
-      `${UPSTOX_BASE}/search?q=${encodeURIComponent(query)}&exchange=NSE`,
-      { headers }
-    );
-
-    if (res.status === 401 || res.status === 403) return [];
-    if (!res.ok) return [];
-
-    const data = await res.json();
-
-    return (data?.data ?? []).slice(0, 10).map((item: Record<string, unknown>) => ({
-      symbol: (item.trading_symbol as string) ?? (item.symbol as string) ?? "",
-      company_name: (item.company_name as string) ?? (item.name as string) ?? "",
-      exchange: "NSE",
-      instrument_type: (item.instrument_type as string) ?? "EQ",
-    }));
-  } catch {
-    return [];
-  }
+  // Upstox has no instrument-search endpoint; search the cached instrument
+  // master instead. It's a public file, so this works without an access token.
+  const results = await searchInstruments(query);
+  return results.map((r) => ({
+    symbol: r.symbol,
+    company_name: r.company_name,
+    exchange: r.exchange,
+    instrument_type: r.instrument_type,
+  }));
 }

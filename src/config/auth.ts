@@ -118,7 +118,7 @@ export const authConfig = {
     creatingAccount: "Creating Account...",
   },
 
-  securityText: "\uD83D\uDD12 256-bit SSL encrypted \u00B7 Your data is safe",
+  securityText: "\uD83D\uDD12 256-bit TLS encrypted connection \u00B7 Private to your account",
 
   success: {
     signupComplete:

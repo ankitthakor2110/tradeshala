@@ -12,6 +12,20 @@ export interface TestResult {
   brokerName: string;
 }
 
+/**
+ * Strips encrypted secret material before a connection is handed to the
+ * browser. The UI only needs to know a secret exists, never its value — the
+ * stored value is ciphertext and is only ever decrypted server-side.
+ */
+function redactSecrets(conn: BrokerConnection): BrokerConnection {
+  return {
+    ...conn,
+    api_secret: null,
+    access_token: null,
+    totp_secret: null,
+  };
+}
+
 export async function getActiveBroker(
   userId: string
 ): Promise<BrokerConnection | null> {
@@ -27,7 +41,7 @@ export async function getActiveBroker(
 
     if (error || !data) return null;
 
-    return data;
+    return redactSecrets(data);
   } catch {
     return null;
   }
@@ -48,7 +62,7 @@ export async function getAllBrokerConnections(
 
     if (error || !data) return [];
 
-    return data;
+    return data.map(redactSecrets);
   } catch {
     return [];
   }
@@ -60,31 +74,21 @@ export async function saveBrokerCredentials(
   brokerName: string,
   credentials: Record<string, string>
 ): Promise<BrokerResult> {
+  // Routed through the server so sensitive fields are encrypted at rest with
+  // the server-only key. The userId param is kept for signature compatibility
+  // but the server derives the real user from the session — it is not trusted.
+  void userId;
   try {
-    const supabase = createClient();
+    const response = await fetch("/api/broker/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brokerId, brokerName, credentials }),
+    });
 
-    const row = {
-      user_id: userId,
-      broker_id: brokerId,
-      broker_name: brokerName,
-      is_connected: false,
-      is_active: false,
-      api_key: credentials.api_key ?? null,
-      api_secret: credentials.api_secret ?? null,
-      access_token: credentials.access_token ?? null,
-      client_id: credentials.client_id ?? null,
-      totp_secret: credentials.totp_secret ?? null,
-      token_expiry: null,
-      last_connected_at: null,
-      updated_at: new Date().toISOString(),
-    };
+    const data = await response.json();
 
-    const { error } = await supabase
-      .from("broker_connections")
-      .upsert(row as never, { onConflict: "user_id,broker_id" });
-
-    if (error) {
-      return { success: false, error: error.message };
+    if (!response.ok || !data.success) {
+      return { success: false, error: data.error ?? "Failed to save credentials." };
     }
 
     return { success: true, error: null };

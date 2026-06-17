@@ -16,6 +16,7 @@ export const POSITIONS_CONFIG = {
       "LTP",
       "Invested",
       "Current Value",
+      "Day P&L",
       "Unrealized P&L",
       "P&L %",
       "Actions",

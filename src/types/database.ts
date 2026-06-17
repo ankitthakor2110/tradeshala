@@ -126,6 +126,18 @@ export interface MarketData {
   last_updated: string;
 }
 
+export interface LiveQuote {
+  symbol: string;
+  exchange: string;
+  ltp: number;
+  prev_close: number;
+  change: number;
+  change_percent: number;
+  volume: number;
+  ts: string | null;
+  updated_at: string;
+}
+
 export interface BrokerConnectionStatus {
   isConnected: boolean;
   brokerName: string | null;
@@ -215,6 +227,9 @@ export interface Position {
   notes: string | null;
   tags: string[] | null;
   status: "OPEN" | "CLOSED";
+  stop_loss: number | null;
+  target: number | null;
+  alert_price: number | null;
   opened_at: string;
   closed_at: string | null;
   updated_at: string;
@@ -297,12 +312,23 @@ export interface OptionChainData {
   totalPeOI: number;
 }
 
+export interface ChargeBreakdown {
+  brokerage: number;
+  stt: number;
+  txn: number;
+  sebi: number;
+  stamp: number;
+  gst: number;
+  total: number;
+}
+
 export interface SimulatedFill {
   executed_price: number;
   slippage: number;
   brokerage: number;
-  total_charges: number;
+  total_charges: number; // brokerage + statutory charges (cash); slippage is in executed_price
   net_price: number;
+  charges?: ChargeBreakdown;
 }
 
 export interface SidebarItem {
@@ -344,6 +370,11 @@ export interface Database {
         Row: BrokerConnection;
         Insert: Omit<BrokerConnection, "id" | "created_at" | "updated_at">;
         Update: Partial<Omit<BrokerConnection, "id" | "user_id" | "created_at">>;
+      };
+      live_quotes: {
+        Row: LiveQuote;
+        Insert: Omit<LiveQuote, "updated_at"> & { updated_at?: string };
+        Update: Partial<LiveQuote>;
       };
     };
   };

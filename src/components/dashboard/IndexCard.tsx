@@ -62,7 +62,7 @@ export default function IndexCard({
             className={`text-xs font-medium px-2 py-0.5 rounded-full ${getPnLBgColor(index.isPositive ? 1 : -1)}`}
           >
             {index.isPositive ? "+" : "-"}
-            {index.changePercent}%
+            {index.changePercent.toFixed(2)}%
           </span>
         </div>
         <LiveBadge source={dataSource} lastUpdated={lastUpdated ?? null} />
@@ -78,7 +78,7 @@ export default function IndexCard({
           >
             {index.isPositive ? "+" : ""}
             {index.change.toFixed(2)} ({index.isPositive ? "+" : "-"}
-            {index.changePercent}%)
+            {index.changePercent.toFixed(2)}%)
           </p>
           {lastUpdated && (
             <p className="text-[10px] text-gray-600 mt-1">

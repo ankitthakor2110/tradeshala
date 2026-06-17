@@ -13,6 +13,7 @@ import { getIndicesData, getGainersLosers } from "@/services/market-data.service
 import { getPnLColor } from "@/utils/colors";
 import { timeAgo } from "@/utils/format";
 import { useIsMounted } from "@/hooks/useIsMounted";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import IndexCard, { IndexCardSkeleton } from "@/components/dashboard/IndexCard";
 import LiveBadge from "@/components/ui/LiveBadge";
 import type { DashboardStats, IndexData, StockGainerLoser } from "@/types/database";
@@ -61,6 +62,9 @@ function DashboardContent() {
   const [fetchError, setFetchError] = useState(false);
   const [moversLastUpdated, setMoversLastUpdated] = useState<string | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Live index prices pushed over Supabase Realtime (no polling).
+  const { quotes: liveQuotes } = useLiveQuotes(["NIFTY 50", "BANK NIFTY"]);
 
   const { labels, currency } = dashboardConfig;
 
@@ -167,17 +171,42 @@ function DashboardContent() {
   }, []);
 
   useEffect(() => {
+    // Initial fetch paints indices (with sparklines) + movers. Live index
+    // prices then arrive via Supabase Realtime — no polling interval.
     fetchLiveData();
 
-    const interval = setInterval(() => {
-      if (getMarketStatus()) fetchLiveData();
-    }, 30000);
-
     return () => {
-      clearInterval(interval);
       if (retryRef.current) clearTimeout(retryRef.current);
     };
   }, [fetchLiveData]);
+
+  // Merge live ticks into the index tiles as they arrive.
+  useEffect(() => {
+    if (Object.keys(liveQuotes).length === 0) return;
+
+    setIndices((prev) => {
+      if (prev.length === 0) return prev;
+      let changed = false;
+      const next = prev.map((idx) => {
+        const q = liveQuotes[idx.name];
+        if (!q) return idx;
+        changed = true;
+        return {
+          ...idx,
+          value: q.ltp,
+          change: q.change,
+          changePercent: Math.abs(q.change_percent),
+          isPositive: q.change >= 0,
+          sparklineData: [...idx.sparklineData.slice(1), q.ltp],
+        };
+      });
+      return changed ? next : prev;
+    });
+
+    setIsLiveData(true);
+    setDataSource("upstox");
+    setLastUpdated(new Date().toISOString());
+  }, [liveQuotes]);
 
   if (!mounted) return null;
 
@@ -399,7 +428,7 @@ function StockList({
                     className={`text-sm font-medium ${getPnLColor(stock.isPositive ? 1 : -1)}`}
                   >
                     {stock.isPositive ? "+" : ""}
-                    {stock.changePercent.toFixed(1)}%
+                    {stock.changePercent.toFixed(2)}%
                   </span>
                   <span className={`text-xs ml-2 ${stock.isPositive ? "text-green-500" : "text-red-500"}`}>
                     {stock.isPositive ? "+" : ""}

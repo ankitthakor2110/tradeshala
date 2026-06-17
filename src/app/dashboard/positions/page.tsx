@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef, Fragment, type ReactNode } from "react";
 import Link from "next/link";
 import {
   ComposedChart,
@@ -26,42 +26,14 @@ import Skeleton from "@/components/ui/Skeleton";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { POSITIONS_CONFIG } from "@/config/positions";
 import { useIsMounted } from "@/hooks/useIsMounted";
+import { usePositions, type PositionView } from "@/hooks/usePositions";
+import { closePosition, addToPosition } from "@/services/trade-engine.service";
+import { getRecentOrders, setPositionRisk } from "@/services/positions.service";
+import { getOptionGreeks, type OptionGreeks } from "@/services/market-data.service";
+import { showToast } from "@/components/ui/Toast";
+import type { Order } from "@/types/database";
 
-// --- Local types (page runs on mock data) ---
-interface MockPosition {
-  id: string;
-  symbol: string;
-  instrument_type: "EQ" | "CE" | "PE";
-  option_type: "CE" | "PE" | null;
-  strike_price: number | null;
-  expiry_date: string | null;
-  quantity: number;
-  average_price: number;
-  total_invested: number;
-  current_price: number;
-  current_value: number;
-  unrealized_pnl?: number;
-  realized_pnl?: number;
-  pnl_percent: number;
-  status: "OPEN" | "CLOSED";
-  opened_at: string;
-  closed_at?: string;
-  exchange: string;
-}
-
-interface Summary {
-  totalOpenPositions: number;
-  todayTotalPnL: number;
-  openUnrealizedPnL: number;
-  openUnrealizedPnLPercent: number;
-  todayRealizedPnL: number;
-  overallPnL: number;
-  overallPnLPercent: number;
-  winRate: number;
-  bestPosition: MockPosition | null;
-  worstPosition: MockPosition | null;
-}
-
+// --- Local types ---
 interface ChartPoint {
   date: string;
   daily: number;
@@ -72,130 +44,41 @@ type ChartPeriod = "Today" | "1W" | "1M" | "3M";
 type PnLFilter = "all" | "profit" | "loss";
 type ActiveTab = "open" | "closed";
 
-// --- Mock data ---
-const MOCK_OPEN_POSITIONS: MockPosition[] = [
-  {
-    id: "1",
-    symbol: "NIFTY",
-    instrument_type: "CE",
-    option_type: "CE",
-    strike_price: 22450,
-    expiry_date: "2024-01-25",
-    quantity: 50,
-    average_price: 145.5,
-    total_invested: 7275,
-    current_price: 152.3,
-    current_value: 7615,
-    unrealized_pnl: 340,
-    pnl_percent: 4.67,
-    status: "OPEN",
-    opened_at: new Date().toISOString(),
-    exchange: "NSE",
-  },
-  {
-    id: "2",
-    symbol: "RELIANCE",
-    instrument_type: "EQ",
-    option_type: null,
-    strike_price: null,
-    expiry_date: null,
-    quantity: 10,
-    average_price: 2450,
-    total_invested: 24500,
-    current_price: 2485,
-    current_value: 24850,
-    unrealized_pnl: 350,
-    pnl_percent: 1.43,
-    status: "OPEN",
-    opened_at: new Date().toISOString(),
-    exchange: "NSE",
-  },
-  {
-    id: "3",
-    symbol: "HDFCBANK",
-    instrument_type: "EQ",
-    option_type: null,
-    strike_price: null,
-    expiry_date: null,
-    quantity: 5,
-    average_price: 1580,
-    total_invested: 7900,
-    current_price: 1562,
-    current_value: 7810,
-    unrealized_pnl: -90,
-    pnl_percent: -1.14,
-    status: "OPEN",
-    opened_at: new Date().toISOString(),
-    exchange: "NSE",
-  },
-];
+// Builds the realized-P&L trend from closed positions, grouped by close date
+// and filtered to the selected period. Replaces the old mock series.
+function buildPnLSeries(closed: PositionView[], period: ChartPeriod): ChartPoint[] {
+  const now = new Date();
+  const cutoff = new Date(now);
+  if (period === "Today") cutoff.setHours(0, 0, 0, 0);
+  else if (period === "1W") cutoff.setDate(now.getDate() - 7);
+  else if (period === "1M") cutoff.setDate(now.getDate() - 30);
+  else cutoff.setDate(now.getDate() - 90); // 3M
 
-const MOCK_CLOSED_POSITIONS: MockPosition[] = [
-  {
-    id: "4",
-    symbol: "BANKNIFTY",
-    instrument_type: "PE",
-    option_type: "PE",
-    strike_price: 48000,
-    expiry_date: "2024-01-25",
-    quantity: 15,
-    average_price: 220,
-    total_invested: 3300,
-    current_price: 198,
-    current_value: 2970,
-    realized_pnl: -330,
-    pnl_percent: -10,
-    status: "CLOSED",
-    opened_at: new Date(Date.now() - 3600000).toISOString(),
-    closed_at: new Date().toISOString(),
-    exchange: "NSE",
-  },
-  {
-    id: "5",
-    symbol: "TCS",
-    instrument_type: "EQ",
-    option_type: null,
-    strike_price: null,
-    expiry_date: null,
-    quantity: 8,
-    average_price: 3850,
-    total_invested: 30800,
-    current_price: 3920,
-    current_value: 31360,
-    realized_pnl: 560,
-    pnl_percent: 1.82,
-    status: "CLOSED",
-    opened_at: new Date(Date.now() - 7200000).toISOString(),
-    closed_at: new Date().toISOString(),
-    exchange: "NSE",
-  },
-];
+  const byDay = new Map<string, number>();
+  for (const p of closed) {
+    if (!p.closed_at) continue;
+    const d = new Date(p.closed_at);
+    if (d < cutoff) continue;
+    const key = d.toISOString().slice(0, 10);
+    byDay.set(key, (byDay.get(key) ?? 0) + p.realized_pnl);
+  }
 
-const MOCK_CHART_DATA: ChartPoint[] = [
-  { date: "1 Jan", daily: 500, cumulative: 500 },
-  { date: "2 Jan", daily: -200, cumulative: 300 },
-  { date: "3 Jan", daily: 800, cumulative: 1100 },
-  { date: "4 Jan", daily: -150, cumulative: 950 },
-  { date: "5 Jan", daily: 600, cumulative: 1550 },
-  { date: "6 Jan", daily: 340, cumulative: 1890 },
-  { date: "7 Jan", daily: -90, cumulative: 1800 },
-];
-
-const MOCK_SUMMARY: Summary = {
-  totalOpenPositions: 3,
-  todayTotalPnL: 600,
-  openUnrealizedPnL: 600,
-  openUnrealizedPnLPercent: 1.54,
-  todayRealizedPnL: 230,
-  overallPnL: 1800,
-  overallPnLPercent: 4.5,
-  winRate: 65,
-  bestPosition: MOCK_OPEN_POSITIONS[1],
-  worstPosition: MOCK_OPEN_POSITIONS[2],
-};
+  let cumulative = 0;
+  return Array.from(byDay.keys())
+    .sort()
+    .map((key) => {
+      const daily = Math.round((byDay.get(key) ?? 0) * 100) / 100;
+      cumulative = Math.round((cumulative + daily) * 100) / 100;
+      const date = new Date(`${key}T00:00:00`).toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+      });
+      return { date, daily, cumulative };
+    });
+}
 
 // --- Helpers ---
-function getInstrumentLabel(p: MockPosition): string {
+function getInstrumentLabel(p: PositionView): string {
   if (p.instrument_type === "CE" || p.instrument_type === "PE") {
     const expiryShort = p.expiry_date
       ? new Date(p.expiry_date).toLocaleDateString("en-IN", {
@@ -214,6 +97,72 @@ function getInstrumentBadgeClass(type: string): string {
   if (type === "CE") return "bg-green-500/10 text-green-400 border-green-500/20";
   if (type === "PE") return "bg-red-500/10 text-red-400 border-red-500/20";
   return "bg-violet-500/10 text-violet-400 border-violet-500/20";
+}
+
+type SortKey = "symbol" | "qty" | "ltp" | "invested" | "value" | "daypnl" | "pnl" | "pnlpct";
+
+// Maps a column header to the field it sorts by (headers not listed aren't sortable).
+const SORT_BY_HEADER: Record<string, SortKey> = {
+  Instrument: "symbol",
+  Qty: "qty",
+  LTP: "ltp",
+  Invested: "invested",
+  "Current Value": "value",
+  "Day P&L": "daypnl",
+  "Unrealized P&L": "pnl",
+  "P&L %": "pnlpct",
+};
+
+function sortValue(p: PositionView, key: SortKey): number | string {
+  switch (key) {
+    case "symbol": return p.symbol;
+    case "qty": return p.quantity;
+    case "ltp": return p.current_price;
+    case "invested": return p.total_invested;
+    case "value": return p.current_value;
+    case "daypnl": return p.day_pnl ?? 0;
+    case "pnl": return p.unrealized_pnl ?? 0;
+    case "pnlpct": return p.pnl_percent;
+  }
+}
+
+function daysToExpiry(expiry: string | null): number | null {
+  if (!expiry) return null;
+  const d = new Date(`${expiry}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((d.getTime() - today.getTime()) / 86_400_000);
+}
+
+function pnlHealth(pnl: number): { label: string; cls: string } {
+  if (pnl > 0) return { label: "In profit", cls: "bg-green-500/10 text-green-400" };
+  if (pnl < 0) return { label: "In loss", cls: "bg-red-500/10 text-red-400" };
+  return { label: "Flat", cls: "bg-gray-700/40 text-gray-400" };
+}
+
+function expiryChip(dte: number | null): { label: string; cls: string } | null {
+  if (dte === null) return null;
+  if (dte < 0) return { label: "Expired", cls: "bg-gray-700/40 text-gray-400" };
+  if (dte <= 2) return { label: `${dte}d to expiry`, cls: "bg-amber-500/10 text-amber-400" };
+  return { label: `${dte}d left`, cls: "bg-gray-700/40 text-gray-400" };
+}
+
+// Option breakeven = strike ± premium; equity breakeven = average price.
+function breakeven(p: PositionView): number {
+  if (p.instrument_type === "CE") return (p.strike_price ?? 0) + p.average_price;
+  if (p.instrument_type === "PE") return (p.strike_price ?? 0) - p.average_price;
+  return p.average_price;
+}
+
+// Partial-close qty for a preset fraction, kept to whole lots for derivatives.
+function lotAlignedQty(fraction: number, p: PositionView): number {
+  const raw = Math.round(p.quantity * fraction);
+  if (p.instrument_type === "EQ" || p.lot_size <= 1) {
+    return Math.max(1, Math.min(p.quantity, raw));
+  }
+  const lots = Math.max(1, Math.round(raw / p.lot_size));
+  return Math.min(p.quantity, lots * p.lot_size);
 }
 
 interface TooltipPayload {
@@ -244,15 +193,228 @@ function ChartTooltip({ active, payload, label }: TooltipProps) {
   );
 }
 
+// Builds a CSV and triggers a browser download (client-only).
+function downloadCsv(filename: string, headers: string[], rows: (string | number)[][]) {
+  const esc = (v: string | number) => {
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const content = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\n");
+  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8;" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Briefly tints its content green/red when the numeric value changes (live tick).
+function FlashValue({ value, children }: { value: number; children: ReactNode }) {
+  const [flash, setFlash] = useState<"up" | "down" | "">("");
+  const prev = useRef(value);
+  useEffect(() => {
+    if (value === prev.current) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- flash on external price tick
+    setFlash(value > prev.current ? "up" : "down");
+    prev.current = value;
+    const t = setTimeout(() => setFlash(""), 600);
+    return () => clearTimeout(t);
+  }, [value]);
+  return (
+    <span
+      className={`rounded px-1 transition-colors duration-300 ${
+        flash === "up" ? "bg-green-500/25" : flash === "down" ? "bg-red-500/25" : ""
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
+
+// Shared expandable detail (breakeven, DTE, partial close, fills) — used by both
+// the desktop table row and the mobile card.
+function PositionDetail({
+  p,
+  onClose,
+  onAdd,
+  onSaveRisk,
+  closing,
+  adding,
+  savingRisk,
+  fills,
+  fillsLoading,
+  greeks,
+}: {
+  p: PositionView;
+  onClose: (qty: number) => void;
+  onAdd: (qty: number) => void;
+  onSaveRisk: (fields: { stop_loss: number | null; target: number | null; alert_price: number | null }) => void;
+  closing: boolean;
+  adding: boolean;
+  savingRisk: boolean;
+  fills: Order[];
+  fillsLoading: boolean;
+  greeks: OptionGreeks | null;
+}) {
+  const [closeQty, setCloseQty] = useState(p.quantity);
+  const [addQty, setAddQty] = useState(p.instrument_type === "EQ" ? 1 : p.lot_size || 1);
+  const [sl, setSl] = useState(p.stop_loss != null ? String(p.stop_loss) : "");
+  const [tgt, setTgt] = useState(p.target != null ? String(p.target) : "");
+  const [alertPrice, setAlertPrice] = useState(p.alert_price != null ? String(p.alert_price) : "");
+  const numOrNull = (s: string) => {
+    const n = parseFloat(s);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  return (
+    <div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs mb-3">
+        <div>
+          <p className="text-gray-500">Breakeven</p>
+          <p className="text-white font-medium">{formatIndianCurrency(breakeven(p))}</p>
+        </div>
+        {p.instrument_type !== "EQ" && (
+          <div>
+            <p className="text-gray-500">Days to expiry</p>
+            <p className="text-white font-medium">
+              {daysToExpiry(p.expiry_date) === null ? "—" : `${daysToExpiry(p.expiry_date)}d`}
+            </p>
+          </div>
+        )}
+        <div>
+          <p className="text-gray-500">Day P&L</p>
+          <p className={`font-medium ${getPnLColor(p.day_pnl ?? 0)}`}>{formatIndianCurrency(p.day_pnl ?? 0, { sign: true })}</p>
+        </div>
+        <div>
+          <p className="text-gray-500">Avg / LTP</p>
+          <p className="text-white font-medium">{formatIndianCurrency(p.average_price)} / {formatIndianCurrency(p.current_price)}</p>
+        </div>
+        <div>
+          <p className="text-gray-500">Opened</p>
+          <p className="text-white font-medium">{formatDate(p.opened_at)}</p>
+        </div>
+      </div>
+
+      {p.instrument_type !== "EQ" && greeks && (
+        <div className="grid grid-cols-3 gap-3 text-xs mb-3 bg-gray-800/40 rounded-lg p-2">
+          <div><p className="text-gray-500">Delta</p><p className="text-white font-medium">{greeks.delta.toFixed(2)}</p></div>
+          <div><p className="text-gray-500">Theta</p><p className="text-white font-medium">{greeks.theta.toFixed(2)}</p></div>
+          <div><p className="text-gray-500">IV</p><p className="text-white font-medium">{greeks.iv.toFixed(2)}%</p></div>
+        </div>
+      )}
+
+      {/* Add / average */}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <span className="text-xs text-gray-400">Add qty:</span>
+        <input
+          type="number"
+          min={1}
+          value={addQty}
+          onChange={(e) => setAddQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+          className={`w-20 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`}
+        />
+        <button
+          onClick={() => onAdd(addQty)}
+          disabled={adding}
+          className="text-xs px-3 py-1 rounded-md border border-green-500/40 text-green-400 hover:bg-green-500 hover:text-white hover:border-green-500 cursor-pointer active:scale-95 transition-all duration-200 flex items-center gap-1.5"
+        >
+          {adding ? <ButtonLoader /> : null}
+          Add (market buy)
+        </button>
+      </div>
+
+      {/* Partial / full close */}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <span className="text-xs text-gray-400">Close qty:</span>
+        {[0.25, 0.5, 1].map((f) => (
+          <button
+            key={f}
+            onClick={() => setCloseQty(lotAlignedQty(f, p))}
+            className="text-[11px] px-2 py-1 rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 cursor-pointer active:scale-95 transition-all duration-200"
+          >
+            {Math.round(f * 100)}%
+          </button>
+        ))}
+        <input
+          type="number"
+          min={1}
+          max={p.quantity}
+          value={closeQty}
+          onChange={(e) => setCloseQty(Math.max(1, Math.min(p.quantity, parseInt(e.target.value, 10) || 1)))}
+          className={`w-20 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`}
+        />
+        <span className="text-xs text-gray-500">/ {p.quantity}</span>
+        <button
+          onClick={() => onClose(closeQty)}
+          disabled={closing}
+          className={`${INTERACTION_CLASSES.dangerButton} text-xs text-white px-3 py-1 rounded-md flex items-center gap-1.5`}
+        >
+          {closing ? <ButtonLoader /> : null}
+          Close {closeQty >= p.quantity ? "all" : closeQty}
+        </button>
+      </div>
+
+      {/* SL / Target / Alert */}
+      <div className="flex flex-wrap items-end gap-2 mb-1">
+        <div>
+          <p className="text-[10px] text-gray-500 mb-0.5">Stop-loss</p>
+          <input type="number" value={sl} onChange={(e) => setSl(e.target.value)} placeholder="—" className={`w-24 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`} />
+        </div>
+        <div>
+          <p className="text-[10px] text-gray-500 mb-0.5">Target</p>
+          <input type="number" value={tgt} onChange={(e) => setTgt(e.target.value)} placeholder="—" className={`w-24 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`} />
+        </div>
+        <div>
+          <p className="text-[10px] text-gray-500 mb-0.5">Alert</p>
+          <input type="number" value={alertPrice} onChange={(e) => setAlertPrice(e.target.value)} placeholder="—" className={`w-24 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`} />
+        </div>
+        <button
+          onClick={() => onSaveRisk({ stop_loss: numOrNull(sl), target: numOrNull(tgt), alert_price: numOrNull(alertPrice) })}
+          disabled={savingRisk}
+          className={`${INTERACTION_CLASSES.secondaryButton} text-xs text-gray-200 px-3 py-1.5 rounded-md flex items-center gap-1.5`}
+        >
+          {savingRisk ? <ButtonLoader /> : null}
+          Save
+        </button>
+      </div>
+      <p className="text-[10px] text-gray-600 mb-3">SL/Target auto-close while this page is open.</p>
+
+      <div>
+        <p className="text-xs text-gray-400 mb-1">Recent fills</p>
+        {fillsLoading ? (
+          <p className="text-xs text-gray-500">Loading…</p>
+        ) : fills.length === 0 ? (
+          <p className="text-xs text-gray-500">No fills found</p>
+        ) : (
+          <div className="space-y-1 max-w-md">
+            {fills.map((o) => (
+              <div key={o.id} className="flex items-center justify-between text-xs gap-3">
+                <span className={o.trade_type === "BUY" ? "text-green-400" : "text-red-400"}>
+                  {o.trade_type} {o.executed_quantity ?? o.quantity}
+                </span>
+                <span className="text-gray-300">{formatIndianCurrency(o.executed_price ?? o.price ?? 0)}</span>
+                <span className="text-gray-500">{timeAgo(o.executed_at)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // --- Page ---
 export default function PositionsPage() {
   const mounted = useIsMounted();
-  const [loading, setLoading] = useState(true);
+  const {
+    open: openPositions,
+    closed: closedPositions,
+    summary,
+    loading,
+    userId,
+    isLive,
+    refresh,
+  } = usePositions();
   const [refreshing, setRefreshing] = useState(false);
-  const [openPositions, setOpenPositions] = useState<MockPosition[]>([]);
-  const [closedPositions, setClosedPositions] = useState<MockPosition[]>([]);
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [chartData, setChartData] = useState<ChartPoint[]>([]);
   const [activeTab, setActiveTab] = useState<ActiveTab>("open");
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>("1M");
   const [closingId, setClosingId] = useState<string | null>(null);
@@ -262,95 +424,204 @@ export default function PositionsPage() {
   const [lastUpdated, setLastUpdated] = useState<string>(
     new Date().toISOString()
   );
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    const loadTimer = setTimeout(() => {
-      setOpenPositions(MOCK_OPEN_POSITIONS);
-      setClosedPositions(MOCK_CLOSED_POSITIONS);
-      setSummary(MOCK_SUMMARY);
-      setChartData(MOCK_CHART_DATA);
-      setLoading(false);
-      setLastUpdated(new Date().toISOString());
-    }, 1000);
+  const chartData = useMemo(
+    () => buildPnLSeries(closedPositions, chartPeriod),
+    [closedPositions, chartPeriod]
+  );
 
-    intervalRef.current = setInterval(() => {
-      setOpenPositions((prev) =>
-        prev.map((p) => {
-          const newPrice =
-            Math.round(p.current_price * (1 + (Math.random() - 0.5) * 0.002) * 100) /
-            100;
-          const newValue = Math.round(newPrice * p.quantity * 100) / 100;
-          const unrealized = Math.round((newValue - p.total_invested) * 100) / 100;
-          const pct =
-            p.total_invested > 0
-              ? Math.round((unrealized / p.total_invested) * 10000) / 100
-              : 0;
-          return {
-            ...p,
-            current_price: newPrice,
-            current_value: newValue,
-            unrealized_pnl: unrealized,
-            pnl_percent: pct,
-          };
-        })
-      );
-      setLastUpdated(new Date().toISOString());
-    }, POSITIONS_CONFIG.refreshInterval);
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("pnl");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [grouped, setGrouped] = useState(false);
+  const [addingId, setAddingId] = useState<string | null>(null);
+  const [savingRiskId, setSavingRiskId] = useState<string | null>(null);
+  const [fills, setFills] = useState<Order[]>([]);
+  const [fillsLoading, setFillsLoading] = useState(false);
+  const [greeks, setGreeks] = useState<OptionGreeks | null>(null);
+  const triggeredRef = useRef<Set<string>>(new Set());
+  const alertedRef = useRef<Set<string>>(new Set());
+  const prevPriceRef = useRef<Map<string, number>>(new Map());
 
-    return () => {
-      clearTimeout(loadTimer);
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+  const toggleExpand = useCallback(
+    async (p: PositionView) => {
+      if (expandedId === p.id) {
+        setExpandedId(null);
+        return;
+      }
+      setExpandedId(p.id);
+      setFills([]);
+      setGreeks(null);
+      setFillsLoading(true);
+      const [orders, g] = await Promise.all([
+        userId ? getRecentOrders(userId, p.symbol) : Promise.resolve([]),
+        p.instrument_type !== "EQ"
+          ? getOptionGreeks(
+              p.symbol,
+              p.expiry_date,
+              p.strike_price,
+              p.instrument_type === "PE" ? "PE" : "CE"
+            )
+          : Promise.resolve(null),
+      ]);
+      setFills(orders);
+      setGreeks(g);
+      setFillsLoading(false);
+    },
+    [expandedId, userId]
+  );
+
+  const toggleSort = useCallback((key: SortKey) => {
+    setSortKey((prevKey) => {
+      if (prevKey === key) {
+        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        return prevKey;
+      }
+      setSortDir(key === "symbol" ? "asc" : "desc");
+      return key;
+    });
   }, []);
+
+  const displayedOpen = useMemo(() => {
+    const q = search.trim().toUpperCase();
+    const list = q
+      ? openPositions.filter((p) => p.symbol.toUpperCase().includes(q))
+      : openPositions;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const av = sortValue(a, sortKey);
+      const bv = sortValue(b, sortKey);
+      if (typeof av === "string") return dir * av.localeCompare(bv as string);
+      return dir * ((av as number) - (bv as number));
+    });
+  }, [openPositions, search, sortKey, sortDir]);
+
+  const exposure = useMemo(() => {
+    const byUnderlying = new Map<string, number>();
+    const byType: Record<string, number> = {};
+    let total = 0;
+    for (const p of openPositions) {
+      const v = p.current_value;
+      total += v;
+      byUnderlying.set(p.symbol, (byUnderlying.get(p.symbol) ?? 0) + v);
+      byType[p.instrument_type] = (byType[p.instrument_type] ?? 0) + v;
+    }
+    const underlyings = Array.from(byUnderlying.entries())
+      .map(([symbol, value]) => ({ symbol, value, pct: total > 0 ? (value / total) * 100 : 0 }))
+      .sort((a, b) => b.value - a.value);
+    return { total, underlyings, byType };
+  }, [openPositions]);
+
+  const openTotals = useMemo(
+    () =>
+      displayedOpen.reduce(
+        (t, p) => ({
+          invested: t.invested + p.total_invested,
+          value: t.value + p.current_value,
+          dayPnl: t.dayPnl + (p.day_pnl ?? 0),
+          pnl: t.pnl + (p.unrealized_pnl ?? 0),
+        }),
+        { invested: 0, value: 0, dayPnl: 0, pnl: 0 }
+      ),
+    [displayedOpen]
+  );
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    await new Promise((r) => setTimeout(r, 600));
+    await refresh();
     setLastUpdated(new Date().toISOString());
     setRefreshing(false);
-  }, []);
+  }, [refresh]);
 
   const handleClosePosition = useCallback(
-    async (positionId: string) => {
+    async (positionId: string, qty?: number) => {
+      if (!userId) return;
       setClosingId(positionId);
-      await new Promise((r) => setTimeout(r, 500));
-
-      const toClose = openPositions.find((p) => p.id === positionId);
-      if (toClose) {
-        const closed: MockPosition = {
-          ...toClose,
-          status: "CLOSED",
-          closed_at: new Date().toISOString(),
-          realized_pnl: toClose.unrealized_pnl ?? 0,
-        };
-        setOpenPositions((prev) => prev.filter((p) => p.id !== positionId));
-        setClosedPositions((prev) => [closed, ...prev]);
-      }
-
+      const res = await closePosition(positionId, userId, qty);
+      if (!res.success) showToast(res.message, "error");
+      await refresh();
+      setLastUpdated(new Date().toISOString());
       setClosingId(null);
       setConfirmCloseId(null);
+      setExpandedId(null);
     },
-    [openPositions]
+    [userId, refresh]
   );
 
+  const handleAdd = useCallback(
+    async (positionId: string, qty: number) => {
+      if (!userId) return;
+      setAddingId(positionId);
+      const res = await addToPosition(positionId, userId, qty);
+      showToast(res.success ? res.message : res.message, res.success ? "success" : "error");
+      await refresh();
+      setLastUpdated(new Date().toISOString());
+      setAddingId(null);
+    },
+    [userId, refresh]
+  );
+
+  const handleSaveRisk = useCallback(
+    async (
+      positionId: string,
+      fields: { stop_loss: number | null; target: number | null; alert_price: number | null }
+    ) => {
+      setSavingRiskId(positionId);
+      const ok = await setPositionRisk(positionId, fields);
+      showToast(ok ? "Risk levels saved" : "Failed to save risk levels", ok ? "success" : "error");
+      // Re-arm triggers/alerts for the new levels.
+      triggeredRef.current.delete(positionId);
+      alertedRef.current.delete(positionId);
+      await refresh();
+      setSavingRiskId(null);
+    },
+    [refresh]
+  );
+
+  // Client-side GTT: while this page is open, auto-close on SL/Target and toast
+  // on alert crossings, driven by the live price overlay.
+  useEffect(() => {
+    for (const p of openPositions) {
+      const ltp = p.current_price;
+      if (!triggeredRef.current.has(p.id)) {
+        const hitSL = p.stop_loss != null && ltp <= p.stop_loss;
+        const hitTarget = p.target != null && ltp >= p.target;
+        if (hitSL || hitTarget) {
+          triggeredRef.current.add(p.id);
+          showToast(`${p.symbol}: ${hitSL ? "Stop-loss" : "Target"} hit — closing`, hitSL ? "error" : "success");
+          // eslint-disable-next-line react-hooks/set-state-in-effect -- auto-close on live price cross
+          handleClosePosition(p.id);
+        }
+      }
+      const prev = prevPriceRef.current.get(p.id);
+      if (p.alert_price != null && prev !== undefined && !alertedRef.current.has(p.id)) {
+        const crossed =
+          (prev < p.alert_price && ltp >= p.alert_price) ||
+          (prev > p.alert_price && ltp <= p.alert_price);
+        if (crossed) {
+          alertedRef.current.add(p.id);
+          showToast(`Alert: ${p.symbol} crossed ${formatIndianCurrency(p.alert_price)}`, "info");
+        }
+      }
+      prevPriceRef.current.set(p.id, ltp);
+    }
+  }, [openPositions, handleClosePosition]);
+
   const handleCloseAll = useCallback(async () => {
+    if (!userId) return;
     setClosingAll(true);
-    await new Promise((r) => setTimeout(r, 500));
-    const now = new Date().toISOString();
-    const newlyClosed: MockPosition[] = openPositions.map((p) => ({
-      ...p,
-      status: "CLOSED",
-      closed_at: now,
-      realized_pnl: p.unrealized_pnl ?? 0,
-    }));
-    setClosedPositions((prev) => [...newlyClosed, ...prev]);
-    setOpenPositions([]);
+    for (const p of openPositions) {
+      const res = await closePosition(p.id, userId);
+      if (!res.success) showToast(`${p.symbol}: ${res.message}`, "error");
+    }
+    await refresh();
+    setLastUpdated(new Date().toISOString());
     setClosingAll(false);
     setConfirmCloseId(null);
-  }, [openPositions]);
+  }, [userId, openPositions, refresh]);
 
-  const getFilteredClosed = useCallback((): MockPosition[] => {
+  const getFilteredClosed = useCallback((): PositionView[] => {
     if (filterPnL === "profit") {
       return closedPositions.filter((p) => (p.realized_pnl ?? 0) > 0);
     }
@@ -371,7 +642,48 @@ export default function PositionsPage() {
     null
   );
 
-  const filteredClosed = getFilteredClosed();
+  const searchQ = search.trim().toUpperCase();
+  const filteredClosed = getFilteredClosed().filter(
+    (p) => !searchQ || p.symbol.toUpperCase().includes(searchQ)
+  );
+
+  // When grouped, cluster open rows by underlying and precompute group subtotals.
+  const renderOpen = grouped
+    ? [...displayedOpen].sort((a, b) => a.symbol.localeCompare(b.symbol))
+    : displayedOpen;
+  const groupSubtotals = new Map<string, { pnl: number; dayPnl: number; count: number }>();
+  if (grouped) {
+    for (const p of displayedOpen) {
+      const g = groupSubtotals.get(p.symbol) ?? { pnl: 0, dayPnl: 0, count: 0 };
+      g.pnl += p.unrealized_pnl ?? 0;
+      g.dayPnl += p.day_pnl ?? 0;
+      g.count += 1;
+      groupSubtotals.set(p.symbol, g);
+    }
+  }
+
+  const handleExport = () => {
+    if (activeTab === "open") {
+      downloadCsv(
+        "open-positions.csv",
+        ["Symbol", "Type", "Strike", "Expiry", "Qty", "Avg Price", "LTP", "Invested", "Current Value", "Day P&L", "Unrealized P&L", "P&L %"],
+        displayedOpen.map((p) => [
+          p.symbol, p.instrument_type, p.strike_price ?? "", p.expiry_date ?? "",
+          p.quantity, p.average_price, p.current_price, p.total_invested,
+          p.current_value, p.day_pnl ?? 0, p.unrealized_pnl ?? 0, p.pnl_percent.toFixed(2),
+        ])
+      );
+    } else {
+      downloadCsv(
+        "closed-positions.csv",
+        ["Symbol", "Type", "Qty", "Avg Price", "Exit Price", "Invested", "Exit Value", "Realized P&L", "P&L %", "Closed At"],
+        filteredClosed.map((p) => [
+          p.symbol, p.instrument_type, p.quantity, p.average_price, p.current_price,
+          p.total_invested, p.current_value, p.realized_pnl, p.pnl_percent.toFixed(2), p.closed_at ?? "",
+        ])
+      );
+    }
+  };
 
   // --- Render ---
   return (
@@ -387,7 +699,7 @@ export default function PositionsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <LiveBadge source="demo" lastUpdated={lastUpdated} />
+          <LiveBadge source={isLive ? "upstox" : "cache"} lastUpdated={lastUpdated} />
           <span className="text-xs text-gray-500 hidden md:inline">
             Updated {timeAgo(lastUpdated)}
           </span>
@@ -417,6 +729,16 @@ export default function PositionsPage() {
           )}
         </div>
       </div>
+
+      {/* Sticky compact summary */}
+      {!loading && (
+        <div className="sticky top-0 z-20 -mx-3 sm:mx-0 px-3 sm:px-4 py-2 bg-gray-950/90 backdrop-blur border-b border-gray-800 flex items-center gap-4 overflow-x-auto whitespace-nowrap text-xs rounded-b-lg">
+          <span className="text-gray-400">Open <span className="text-white font-semibold">{summary.totalOpenPositions}</span></span>
+          <span className="text-gray-400">Day <span className={`font-semibold ${getPnLColor(summary.todayTotalPnL)}`}>{formatIndianCurrency(summary.todayTotalPnL, { sign: true })}</span></span>
+          <span className="text-gray-400">Unrealized <span className={`font-semibold ${getPnLColor(summary.openUnrealizedPnL)}`}>{formatIndianCurrency(summary.openUnrealizedPnL, { sign: true })} ({formatPercent(summary.openUnrealizedPnLPercent, { sign: true })})</span></span>
+          <span className="text-gray-400">Overall <span className={`font-semibold ${getPnLColor(summary.overallPnL)}`}>{formatIndianCurrency(summary.overallPnL, { sign: true })}</span></span>
+        </div>
+      )}
 
       {/* Close-all confirmation bar */}
       {confirmCloseId === "all" && (
@@ -481,7 +803,7 @@ export default function PositionsPage() {
                 />
                 <SummaryCard
                   label="Win Rate"
-                  value={`${summary.winRate}%`}
+                  value={formatPercent(summary.winRate)}
                   tone="neutral"
                 />
               </>
@@ -571,6 +893,45 @@ export default function PositionsPage() {
         )}
       </div>
 
+      {/* Exposure breakdown */}
+      {!loading && openPositions.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-3 md:p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm md:text-base font-semibold text-white">Exposure</h3>
+            <span className="text-xs text-gray-400">
+              Deployed {formatIndianCurrency(exposure.total, { maximumFractionDigits: 0 })}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {exposure.underlyings.slice(0, 6).map((u) => (
+              <div key={u.symbol}>
+                <div className="flex items-center justify-between text-xs mb-0.5">
+                  <span className="text-gray-300">{u.symbol}</span>
+                  <span className="text-gray-400">
+                    {formatIndianCurrency(u.value, { maximumFractionDigits: 0 })} ({formatPercent(u.pct)})
+                  </span>
+                </div>
+                <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                  <div className="h-full bg-violet-500 rounded-full" style={{ width: `${Math.min(100, u.pct)}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-4 pt-3 border-t border-gray-800 text-xs">
+            {(["EQ", "CE", "PE", "FUT"] as const)
+              .filter((t) => (exposure.byType[t] ?? 0) > 0)
+              .map((t) => (
+                <span key={t} className="text-gray-400">
+                  {t}{" "}
+                  <span className="text-white font-medium">
+                    {formatIndianCurrency(exposure.byType[t], { maximumFractionDigits: 0 })}
+                  </span>
+                </span>
+              ))}
+          </div>
+        </div>
+      )}
+
       {/* 4. TABS */}
       <div className="flex border-b border-gray-800 overflow-x-auto">
         <TabButton
@@ -583,6 +944,43 @@ export default function PositionsPage() {
           onClick={() => setActiveTab("closed")}
           label={`${POSITIONS_CONFIG.tabs.closed} (${closedPositions.length})`}
         />
+      </div>
+
+      {/* Controls */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[180px] max-w-xs">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search symbol..."
+            className={`w-full bg-gray-900 border border-gray-800 rounded-lg pl-9 pr-9 py-2 text-sm text-white placeholder-gray-500 ${INTERACTION_CLASSES.formInput}`}
+          />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white cursor-pointer"
+              aria-label="Clear search"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          )}
+        </div>
+        <button
+          onClick={() => setGrouped((g) => !g)}
+          className={`text-xs px-3 py-2 rounded-lg border cursor-pointer active:scale-95 transition-all duration-200 ${grouped ? "border-violet-500/50 text-violet-400 bg-violet-500/10" : "border-gray-700 text-gray-300 hover:border-violet-500/50"}`}
+        >
+          Group by underlying
+        </button>
+        <button
+          onClick={handleExport}
+          className="text-xs px-3 py-2 rounded-lg border border-gray-700 text-gray-300 hover:border-violet-500/50 cursor-pointer active:scale-95 transition-all duration-200"
+        >
+          Export CSV
+        </button>
       </div>
 
       {/* OPEN */}
@@ -602,28 +1000,137 @@ export default function PositionsPage() {
               ctaLabel="Place a Trade"
             />
           ) : (
-            <div className="overflow-x-auto -mx-3 md:mx-0 px-3 md:px-0">
-              <div className="bg-gray-900 md:border md:border-gray-800 rounded-xl md:rounded-2xl overflow-hidden">
+            <>
+              {/* Mobile cards */}
+              <div className="md:hidden space-y-2">
+                {renderOpen.map((p, i, arr) => {
+                  const pnl = p.unrealized_pnl ?? 0;
+                  const health = pnlHealth(pnl);
+                  const exp =
+                    p.instrument_type !== "EQ"
+                      ? expiryChip(daysToExpiry(p.expiry_date))
+                      : null;
+                  const newGroup = grouped && (i === 0 || arr[i - 1].symbol !== p.symbol);
+                  return (
+                    <Fragment key={p.id}>
+                    {newGroup && (
+                      <p className="text-xs text-gray-400 font-semibold pt-2 px-1">{p.symbol}</p>
+                    )}
+                    <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-white text-sm">{getInstrumentLabel(p)}</span>
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${getInstrumentBadgeClass(p.instrument_type)}`}>{p.instrument_type}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                            <span className="text-xs text-gray-500">{p.exchange}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${health.cls}`}>{health.label}</span>
+                            {exp && <span className={`text-[10px] px-1.5 py-0.5 rounded ${exp.cls}`}>{exp.label}</span>}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <FlashValue value={p.current_price}>
+                            <span className="text-sm font-semibold text-white">{formatIndianCurrency(p.current_price)}</span>
+                          </FlashValue>
+                          <p className={`text-[10px] inline-block px-1.5 py-0.5 rounded mt-1 ${getPnLBgColor(p.pnl_percent)}`}>
+                            {p.pnl_percent >= 0 ? "▲" : "▼"} {formatPercent(p.pnl_percent, { sign: true })}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+                        <div><p className="text-gray-500">Qty</p><p className="text-gray-200">{p.quantity}</p></div>
+                        <div><p className="text-gray-500">Avg</p><p className="text-gray-200">{formatIndianCurrency(p.average_price)}</p></div>
+                        <div><p className="text-gray-500">Invested</p><p className="text-gray-200">{formatIndianCurrency(p.total_invested)}</p></div>
+                        <div><p className="text-gray-500">Day P&L</p><p className={getPnLColor(p.day_pnl ?? 0)}>{formatIndianCurrency(p.day_pnl ?? 0, { sign: true })}</p></div>
+                        <div className="col-span-2"><p className="text-gray-500">Unrealized P&L</p><p className={getPnLColor(pnl)}>{formatIndianCurrency(pnl, { sign: true })}</p></div>
+                      </div>
+                      <div className="flex items-center gap-2 mt-3">
+                        <button onClick={() => toggleExpand(p)} className="flex-1 text-xs text-gray-300 border border-gray-700 hover:border-violet-500/50 rounded-md py-1.5 cursor-pointer active:scale-95 transition-all duration-200">
+                          {expandedId === p.id ? "Hide" : "Details"}
+                        </button>
+                        <button onClick={() => handleClosePosition(p.id)} disabled={closingId === p.id} className={`flex-1 text-xs text-red-400 border border-red-500/30 hover:bg-red-500 hover:text-white hover:border-red-500 rounded-md py-1.5 cursor-pointer active:scale-95 transition-all duration-200 ${closingId === p.id ? "opacity-50" : ""}`}>
+                          Close
+                        </button>
+                      </div>
+                      {expandedId === p.id && (
+                        <div className="mt-3 border-t border-gray-800 pt-3">
+                          <PositionDetail
+                            p={p}
+                            onClose={(qty) => handleClosePosition(p.id, qty)}
+                            onAdd={(qty) => handleAdd(p.id, qty)}
+                            onSaveRisk={(f) => handleSaveRisk(p.id, f)}
+                            closing={closingId === p.id}
+                            adding={addingId === p.id}
+                            savingRisk={savingRiskId === p.id}
+                            fills={fills}
+                            fillsLoading={fillsLoading}
+                            greeks={greeks}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    </Fragment>
+                  );
+                })}
+                {renderOpen.length === 0 && (
+                  <p className="text-center text-sm text-gray-500 py-6">No matching positions</p>
+                )}
+              </div>
+
+              {/* Desktop table */}
+              <div className="hidden md:block overflow-x-auto -mx-3 md:mx-0 px-3 md:px-0">
+                <div className="bg-gray-900 md:border md:border-gray-800 rounded-xl md:rounded-2xl overflow-hidden">
                   <table className="w-full min-w-[600px] text-sm">
                   <thead>
                     <tr className="text-left text-xs text-gray-500 bg-gray-900/50 border-b border-gray-800">
-                      {POSITIONS_CONFIG.tableHeaders.open.map((h) => (
-                        <th key={h} className="px-2 md:px-4 py-2 md:py-3 font-medium whitespace-nowrap">
-                          {h}
-                        </th>
-                      ))}
+                      {POSITIONS_CONFIG.tableHeaders.open.map((h) => {
+                        const key = SORT_BY_HEADER[h];
+                        const active = key && sortKey === key;
+                        return (
+                          <th
+                            key={h}
+                            onClick={key ? () => toggleSort(key) : undefined}
+                            className={`px-2 md:px-4 py-2 md:py-3 font-medium whitespace-nowrap ${key ? "cursor-pointer select-none hover:text-gray-300" : ""} ${active ? "text-violet-400" : ""}`}
+                          >
+                            {h}
+                            {active ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
-                    {openPositions.map((p) => {
+                    {renderOpen.map((p, i, arr) => {
                       const pnl = p.unrealized_pnl ?? 0;
+                      const health = pnlHealth(pnl);
+                      const exp =
+                        p.instrument_type !== "EQ"
+                          ? expiryChip(daysToExpiry(p.expiry_date))
+                          : null;
+                      const newGroup = grouped && (i === 0 || arr[i - 1].symbol !== p.symbol);
+                      const gt = grouped ? groupSubtotals.get(p.symbol) : null;
                       return (
-                        <tr
-                          key={p.id}
-                          className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors duration-200"
-                        >
+                        <Fragment key={p.id}>
+                        {newGroup && gt && (
+                          <tr className="bg-gray-800/40">
+                            <td colSpan={10} className="px-3 md:px-4 py-1.5 text-xs">
+                              <span className="text-gray-200 font-semibold">{p.symbol}</span>
+                              <span className="text-gray-500"> · {gt.count} {gt.count === 1 ? "position" : "positions"}</span>
+                              <span className={`ml-2 font-medium ${getPnLColor(gt.pnl)}`}>{formatIndianCurrency(gt.pnl, { sign: true })}</span>
+                            </td>
+                          </tr>
+                        )}
+                        <tr className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors duration-200">
                           <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm">
                             <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => toggleExpand(p)}
+                                className="text-gray-500 hover:text-violet-400 cursor-pointer shrink-0"
+                                aria-label="Toggle position details"
+                              >
+                                <svg className={`w-3 h-3 transition-transform duration-200 ${expandedId === p.id ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                              </button>
                               <span className="font-medium text-white">
                                 {getInstrumentLabel(p)}
                               </span>
@@ -633,7 +1140,11 @@ export default function PositionsPage() {
                                 {p.instrument_type}
                               </span>
                             </div>
-                            <p className="text-xs text-gray-500 mt-0.5">{p.exchange}</p>
+                            <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                              <span className="text-xs text-gray-500">{p.exchange}</span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${health.cls}`}>{health.label}</span>
+                              {exp && <span className={`text-[10px] px-1.5 py-0.5 rounded ${exp.cls}`}>{exp.label}</span>}
+                            </div>
                           </td>
                           <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-300">{p.quantity}</td>
                           <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-300">
@@ -642,9 +1153,11 @@ export default function PositionsPage() {
                           <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm">
                             <div className="flex items-center gap-1.5">
                               <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                              <span className="text-white font-medium">
-                                {formatIndianCurrency(p.current_price)}
-                              </span>
+                              <FlashValue value={p.current_price}>
+                                <span className="text-white font-medium">
+                                  {formatIndianCurrency(p.current_price)}
+                                </span>
+                              </FlashValue>
                             </div>
                           </td>
                           <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-300">
@@ -652,6 +1165,9 @@ export default function PositionsPage() {
                           </td>
                           <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-300">
                             {formatIndianCurrency(p.current_value)}
+                          </td>
+                          <td className={`px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm font-medium ${getPnLColor(p.day_pnl ?? 0)}`}>
+                            {formatIndianCurrency(p.day_pnl ?? 0, { sign: true })}
                           </td>
                           <td className={`px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm font-medium ${getPnLColor(pnl)}`}>
                             {formatIndianCurrency(pnl, { sign: true })}
@@ -695,12 +1211,56 @@ export default function PositionsPage() {
                             )}
                           </td>
                         </tr>
+                        {expandedId === p.id && (
+                          <tr className="bg-gray-900/40 border-b border-gray-800/50">
+                            <td colSpan={10} className="px-3 md:px-4 py-3">
+                              <PositionDetail
+                                p={p}
+                                onClose={(qty) => handleClosePosition(p.id, qty)}
+                                onAdd={(qty) => handleAdd(p.id, qty)}
+                                onSaveRisk={(f) => handleSaveRisk(p.id, f)}
+                                closing={closingId === p.id}
+                                adding={addingId === p.id}
+                                savingRisk={savingRiskId === p.id}
+                                fills={fills}
+                                fillsLoading={fillsLoading}
+                                greeks={greeks}
+                              />
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
                       );
                     })}
                   </tbody>
+                  <tfoot>
+                    <tr className="border-t border-gray-800 bg-gray-900/40 font-medium">
+                      <td className="px-2 md:px-4 py-2 md:py-3 text-xs text-gray-400 whitespace-nowrap">
+                        Total ({displayedOpen.length})
+                      </td>
+                      <td />
+                      <td />
+                      <td />
+                      <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-300">
+                        {formatIndianCurrency(openTotals.invested)}
+                      </td>
+                      <td className="px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-300">
+                        {formatIndianCurrency(openTotals.value)}
+                      </td>
+                      <td className={`px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm ${getPnLColor(openTotals.dayPnl)}`}>
+                        {formatIndianCurrency(openTotals.dayPnl, { sign: true })}
+                      </td>
+                      <td className={`px-2 md:px-4 py-2 md:py-3 text-xs md:text-sm ${getPnLColor(openTotals.pnl)}`}>
+                        {formatIndianCurrency(openTotals.pnl, { sign: true })}
+                      </td>
+                      <td />
+                      <td />
+                    </tr>
+                  </tfoot>
                 </table>
+                </div>
               </div>
-            </div>
+            </>
           )}
         </div>
       )}
@@ -811,11 +1371,11 @@ export default function PositionsPage() {
 
       {/* 5. BEST & WORST */}
       {!loading && closedPositions.length > 0 && (() => {
-        const best = closedPositions.reduce<MockPosition | null>(
+        const best = closedPositions.reduce<PositionView | null>(
           (b, p) => (!b || (p.realized_pnl ?? 0) > (b.realized_pnl ?? 0) ? p : b),
           null
         );
-        const worst = closedPositions.reduce<MockPosition | null>(
+        const worst = closedPositions.reduce<PositionView | null>(
           (w, p) => (!w || (p.realized_pnl ?? 0) < (w.realized_pnl ?? 0) ? p : w),
           null
         );

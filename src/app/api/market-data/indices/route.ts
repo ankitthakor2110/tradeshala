@@ -14,6 +14,7 @@ export async function GET() {
     return Response.json({
       nifty50: data.nifty50,
       bankNifty: data.bankNifty,
+      sensex: data.sensex ?? null,
       source,
       last_updated: new Date().toISOString(),
     });

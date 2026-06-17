@@ -184,10 +184,11 @@ function BrokerPageContent() {
     setTestMessage("");
     setGuideOpen(false);
     setManualTokenMode(false);
-    // For OAuth brokers, determine step based on saved creds
+    // For OAuth brokers, determine step based on saved creds. Secrets are
+    // redacted from client reads, so the presence of api_key (saved together
+    // with api_secret in step 1) is the signal that step 1 is complete.
     if (broker.authType === "oauth") {
-      const hasKeyAndSecret = creds.api_key && creds.api_secret;
-      setOauthStep(hasKeyAndSecret ? 2 : 1);
+      setOauthStep(creds.api_key ? 2 : 1);
     } else {
       setOauthStep(1);
     }

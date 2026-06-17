@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { decryptSecret } from "@/lib/crypto/secrets";
 import type { MarketData, BrokerConnection } from "@/types/database";
 
 const CACHE_TTL_MS = 60_000; // 1 minute cache
@@ -163,25 +164,26 @@ export async function GET(request: NextRequest) {
     // Fetch from the appropriate broker API
     let marketData: MarketData | null = null;
     const sym = symbol.toUpperCase();
+    const accessToken = decryptSecret(broker.access_token);
 
     switch (broker.broker_id) {
       case "upstox":
-        if (broker.access_token) {
-          marketData = await fetchUpstoxQuote(sym, broker.access_token);
+        if (accessToken) {
+          marketData = await fetchUpstoxQuote(sym, accessToken);
         }
         break;
       case "zerodha":
-        if (broker.api_key && broker.access_token) {
+        if (broker.api_key && accessToken) {
           marketData = await fetchZerodhaQuote(
             sym,
             broker.api_key,
-            broker.access_token
+            accessToken
           );
         }
         break;
       case "dhan":
-        if (broker.access_token) {
-          marketData = await fetchDhanQuote(sym, broker.access_token);
+        if (accessToken) {
+          marketData = await fetchDhanQuote(sym, accessToken);
         }
         break;
       default:

@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/client";
-import { getStockQuote } from "@/services/market-data.service";
+import { getStockQuote, getOptionLtp } from "@/services/market-data.service";
 import { getMarketStatus } from "@/services/dashboard.service";
 import { TRADE_CONFIG } from "@/config/trade";
 import type {
@@ -7,7 +7,58 @@ import type {
   Position,
   OrderFormData,
   SimulatedFill,
+  ChargeBreakdown,
 } from "@/types/database";
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Approximate Indian statutory charges for one order leg, so paper fills read
+ * like a real contract note. Slippage is NOT included here — it's already baked
+ * into the executed price.
+ */
+function calculateCharges(
+  turnover: number,
+  side: "BUY" | "SELL",
+  isOption: boolean
+): ChargeBreakdown {
+  const brokerage = TRADE_CONFIG.simulation.brokeragePerOrder;
+  const r = isOption ? TRADE_CONFIG.charges.option : TRADE_CONFIG.charges.equity;
+  const stt = (side === "SELL" ? r.sttSell : r.sttBuy) * turnover;
+  const txn = r.txn * turnover;
+  const sebi = r.sebi * turnover;
+  const stamp = side === "BUY" ? r.stampBuy * turnover : 0;
+  const gst = r.gst * (brokerage + txn + sebi);
+  const total = brokerage + stt + txn + sebi + stamp + gst;
+  return {
+    brokerage: round2(brokerage),
+    stt: round2(stt),
+    txn: round2(txn),
+    sebi: round2(sebi),
+    stamp: round2(stamp),
+    gst: round2(gst),
+    total: round2(total),
+  };
+}
+
+function buildFill(
+  executedPrice: number,
+  slippageAmt: number,
+  side: "BUY" | "SELL",
+  qty: number,
+  isOption: boolean
+): SimulatedFill {
+  const ep = round2(executedPrice);
+  const charges = calculateCharges(ep * qty, side, isOption);
+  return {
+    executed_price: ep,
+    slippage: round2(slippageAmt),
+    brokerage: charges.brokerage,
+    total_charges: charges.total,
+    net_price: ep,
+    charges,
+  };
+}
 
 // --- 1. Simulate Fill ---
 
@@ -16,75 +67,39 @@ export function simulateFill(
   currentPrice: number
 ): SimulatedFill | null {
   const { order_type, trade_type, price, trigger_price } = orderData;
-  const { slippagePercent, brokeragePerOrder, maxSlippage } = TRADE_CONFIG.simulation;
+  const { slippagePercent, maxSlippage } = TRADE_CONFIG.simulation;
+  const isOption = orderData.instrument_type !== "EQ";
+  const qty = orderData.quantity;
 
   if (order_type === "MARKET") {
-    const slippage =
-      (Math.random() * (slippagePercent - 0.01) + 0.01) / 100;
+    const slippage = (Math.random() * (slippagePercent - 0.01) + 0.01) / 100;
     const capped = Math.min(slippage, maxSlippage / 100);
-
     const executedPrice =
-      trade_type === "BUY"
-        ? currentPrice * (1 + capped)
-        : currentPrice * (1 - capped);
-
-    const rounded = Math.round(executedPrice * 100) / 100;
-    const slippageAmt = Math.abs(rounded - currentPrice) * orderData.quantity;
-
-    return {
-      executed_price: rounded,
-      slippage: Math.round(slippageAmt * 100) / 100,
-      brokerage: brokeragePerOrder,
-      total_charges: Math.round((slippageAmt + brokeragePerOrder) * 100) / 100,
-      net_price: rounded,
-    };
+      trade_type === "BUY" ? currentPrice * (1 + capped) : currentPrice * (1 - capped);
+    const rounded = round2(executedPrice);
+    const slippageAmt = Math.abs(rounded - currentPrice) * qty;
+    return buildFill(rounded, slippageAmt, trade_type, qty, isOption);
   }
 
   if (order_type === "LIMIT" && price !== null) {
     if (trade_type === "BUY" && currentPrice <= price) {
-      return {
-        executed_price: price,
-        slippage: 0,
-        brokerage: brokeragePerOrder,
-        total_charges: brokeragePerOrder,
-        net_price: price,
-      };
+      return buildFill(price, 0, "BUY", qty, isOption);
     }
     if (trade_type === "SELL" && currentPrice >= price) {
-      return {
-        executed_price: price,
-        slippage: 0,
-        brokerage: brokeragePerOrder,
-        total_charges: brokeragePerOrder,
-        net_price: price,
-      };
+      return buildFill(price, 0, "SELL", qty, isOption);
     }
     return null; // stays PENDING
   }
 
   if ((order_type === "SL" || order_type === "SL-M") && trigger_price !== null) {
-    const slippage =
-      (Math.random() * (slippagePercent - 0.01) + 0.01) / 100;
-
+    const slippage = (Math.random() * (slippagePercent - 0.01) + 0.01) / 100;
     if (trade_type === "BUY" && currentPrice >= trigger_price) {
-      const ep = Math.round(trigger_price * (1 + slippage) * 100) / 100;
-      return {
-        executed_price: ep,
-        slippage: Math.round(Math.abs(ep - trigger_price) * orderData.quantity * 100) / 100,
-        brokerage: brokeragePerOrder,
-        total_charges: Math.round((Math.abs(ep - trigger_price) * orderData.quantity + brokeragePerOrder) * 100) / 100,
-        net_price: ep,
-      };
+      const ep = round2(trigger_price * (1 + slippage));
+      return buildFill(ep, Math.abs(ep - trigger_price) * qty, "BUY", qty, isOption);
     }
     if (trade_type === "SELL" && currentPrice <= trigger_price) {
-      const ep = Math.round(trigger_price * (1 - slippage) * 100) / 100;
-      return {
-        executed_price: ep,
-        slippage: Math.round(Math.abs(trigger_price - ep) * orderData.quantity * 100) / 100,
-        brokerage: brokeragePerOrder,
-        total_charges: Math.round((Math.abs(trigger_price - ep) * orderData.quantity + brokeragePerOrder) * 100) / 100,
-        net_price: ep,
-      };
+      const ep = round2(trigger_price * (1 - slippage));
+      return buildFill(ep, Math.abs(trigger_price - ep) * qty, "SELL", qty, isOption);
     }
     return null; // stays PENDING
   }
@@ -102,6 +117,15 @@ export async function validateOrder(
 
   if (orderData.quantity <= 0) {
     errors.push("Quantity must be greater than 0");
+  }
+
+  // Derivatives trade in whole lots.
+  if (
+    orderData.instrument_type !== "EQ" &&
+    orderData.lot_size > 0 &&
+    orderData.quantity % orderData.lot_size !== 0
+  ) {
+    errors.push(`Quantity must be in multiples of the lot size (${orderData.lot_size})`);
   }
 
   if (orderData.order_type === "LIMIT" && (orderData.price === null || orderData.price <= 0)) {
@@ -122,8 +146,27 @@ export async function validateOrder(
       .eq("id", userId)
       .single<{ virtual_balance: number }>();
 
-    const estimatedCost = orderData.quantity * (orderData.price ?? 0) + TRADE_CONFIG.simulation.brokeragePerOrder;
-    if (profile && estimatedCost > profile.virtual_balance) {
+    // Use the live price (MARKET orders carry no price), so the funds check is
+    // real — you can't buy beyond your virtual cash.
+    let refPrice = orderData.price ?? 0;
+    if (refPrice <= 0) {
+      if (orderData.instrument_type === "EQ") {
+        const q = await getStockQuote(orderData.symbol, orderData.exchange);
+        refPrice = q?.last_price ?? 0;
+      } else {
+        refPrice =
+          (await getOptionLtp(
+            orderData.symbol,
+            orderData.expiry_date,
+            orderData.strike_price,
+            orderData.instrument_type === "PE" ? "PE" : "CE"
+          )) ?? 0;
+      }
+    }
+
+    const estimatedCost =
+      orderData.quantity * refPrice + TRADE_CONFIG.simulation.brokeragePerOrder;
+    if (profile && refPrice > 0 && estimatedCost > profile.virtual_balance) {
       errors.push(
         `Insufficient virtual cash. Available: ₹${profile.virtual_balance.toLocaleString("en-IN")}, Required: ₹${estimatedCost.toLocaleString("en-IN")}`
       );
@@ -178,11 +221,20 @@ export async function placeOrder(
       };
     }
 
-    // Step 2: Get current price
+    // Step 2: Get current price. Equities quote the symbol; options must price
+    // the contract from the chain (the underlying spot would be wrong).
     let currentPrice = orderData.price ?? 0;
-    const quote = await getStockQuote(orderData.symbol, orderData.exchange);
-    if (quote) {
-      currentPrice = quote.last_price;
+    if (orderData.instrument_type === "EQ") {
+      const quote = await getStockQuote(orderData.symbol, orderData.exchange);
+      if (quote) currentPrice = quote.last_price;
+    } else {
+      const premium = await getOptionLtp(
+        orderData.symbol,
+        orderData.expiry_date,
+        orderData.strike_price,
+        orderData.instrument_type === "PE" ? "PE" : "CE"
+      );
+      if (premium) currentPrice = premium;
     }
 
     if (currentPrice <= 0) {
@@ -250,17 +302,20 @@ export async function placeOrder(
     if (isExecuted && fill) {
       await updatePosition(userId, insertedOrder, fill);
 
-      const totalAmount = fill.executed_price * orderData.quantity + fill.brokerage;
+      // Slippage is already in executed_price; total_charges covers brokerage +
+      // statutory charges. Buys pay proceeds + charges; sells receive proceeds
+      // minus charges.
+      const proceeds = fill.executed_price * orderData.quantity;
 
       if (orderData.trade_type === "BUY") {
         await supabase.rpc("deduct_virtual_cash" as never, {
           p_user_id: userId,
-          p_amount: totalAmount,
+          p_amount: round2(proceeds + fill.total_charges),
         } as never);
       } else {
         await supabase.rpc("add_virtual_cash" as never, {
           p_user_id: userId,
-          p_amount: totalAmount - fill.brokerage * 2,
+          p_amount: round2(proceeds - fill.total_charges),
         } as never);
       }
     }
@@ -434,7 +489,8 @@ export async function cancelOrder(
 
 export async function closePosition(
   positionId: string,
-  userId: string
+  userId: string,
+  qty?: number
 ): Promise<OrderResult> {
   try {
     const supabase = createClient();
@@ -456,6 +512,10 @@ export async function closePosition(
       };
     }
 
+    // Partial close when a valid smaller qty is passed; otherwise close fully.
+    const closeQty =
+      qty && qty > 0 && qty < position.quantity ? qty : position.quantity;
+
     return await placeOrder(userId, {
       symbol: position.symbol,
       exchange: position.exchange,
@@ -466,7 +526,7 @@ export async function closePosition(
       lot_size: position.lot_size,
       order_type: "MARKET",
       trade_type: "SELL",
-      quantity: position.quantity,
+      quantity: closeQty,
       price: null,
       trigger_price: null,
       notes: "Position closed",
@@ -478,6 +538,47 @@ export async function closePosition(
       fill: null,
       message: "Failed to close position",
     };
+  }
+}
+
+// --- 8. Add / average into a position ---
+
+export async function addToPosition(
+  positionId: string,
+  userId: string,
+  qty: number
+): Promise<OrderResult> {
+  try {
+    const supabase = createClient();
+    const { data: position } = await supabase
+      .from("positions")
+      .select("*")
+      .eq("id", positionId)
+      .eq("user_id", userId)
+      .eq("status", "OPEN")
+      .single<Position>();
+
+    if (!position) {
+      return { success: false, order: null, fill: null, message: "Position not found" };
+    }
+
+    return await placeOrder(userId, {
+      symbol: position.symbol,
+      exchange: position.exchange,
+      instrument_type: position.instrument_type as "EQ" | "CE" | "PE",
+      option_type: (position.option_type as "CE" | "PE") ?? null,
+      strike_price: position.strike_price,
+      expiry_date: position.expiry_date,
+      lot_size: position.lot_size,
+      order_type: "MARKET",
+      trade_type: "BUY",
+      quantity: qty > 0 ? qty : position.lot_size || 1,
+      price: null,
+      trigger_price: null,
+      notes: "Add to position",
+    });
+  } catch {
+    return { success: false, order: null, fill: null, message: "Failed to add to position" };
   }
 }
 

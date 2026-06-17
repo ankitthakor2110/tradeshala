@@ -58,7 +58,7 @@ export async function getQuote(symbol: string): Promise<WithSource<MarketData | 
 }
 
 export async function getIndices(): Promise<
-  WithSource<{ nifty50: MarketData | null; bankNifty: MarketData | null }>
+  WithSource<{ nifty50: MarketData | null; bankNifty: MarketData | null; sensex?: MarketData | null }>
 > {
   const primary = getPrimary();
 
@@ -81,7 +81,7 @@ export async function getIndices(): Promise<
     }
   }
 
-  return { data: { nifty50: null, bankNifty: null }, source: "unavailable" };
+  return { data: { nifty50: null, bankNifty: null, sensex: null }, source: "unavailable" };
 }
 
 export async function getGainersLosers(): Promise<

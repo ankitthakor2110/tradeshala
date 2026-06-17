@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useIsMounted } from "@/hooks/useIsMounted";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { getCurrentUser } from "@/services/auth.service";
 import { searchStocks, getStockQuote, getIndicesData } from "@/services/market-data.service";
 import { TRADE_CONFIG } from "@/config/trade";
@@ -49,6 +50,7 @@ export default function TradePage() {
 
   const [nifty, setNifty] = useState<MarketData | null>(null);
   const [bankNifty, setBankNifty] = useState<MarketData | null>(null);
+  const [sensex, setSensex] = useState<MarketData | null>(null);
   const [indicesSource, setIndicesSource] = useState<string | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -90,8 +92,33 @@ export default function TradePage() {
       const { data } = await supabase.from("profiles").select("virtual_balance").eq("id", user.id).single<{ virtual_balance: number }>();
       if (data) setVirtualCash(data.virtual_balance);
     });
-    getIndicesData().then((res) => { if (res) { setNifty(res.nifty50); setBankNifty(res.bankNifty); setIndicesSource(res.source ?? null); } });
+    getIndicesData().then((res) => { if (res) { setNifty(res.nifty50); setBankNifty(res.bankNifty); setSensex(res.sensex ?? null); setIndicesSource(res.source ?? null); } });
   }, []);
+
+  // Live prices over Supabase Realtime: the index tickers always, plus the
+  // selected equity while it's being traded.
+  const liveSymbols = useMemo(() => {
+    const arr = ["NIFTY 50", "BANK NIFTY", "SENSEX"];
+    if (selectedSymbol && instrumentType === "EQ") arr.push(selectedSymbol);
+    return arr;
+  }, [selectedSymbol, instrumentType]);
+  const { quotes: live } = useLiveQuotes(liveSymbols);
+
+  useEffect(() => {
+    const n = live["NIFTY 50"];
+    const b = live["BANK NIFTY"];
+    const s = live["SENSEX"];
+    if (n) setNifty((prev) => (prev ? { ...prev, last_price: n.ltp, change: n.change, change_percent: n.change_percent } : prev));
+    if (b) setBankNifty((prev) => (prev ? { ...prev, last_price: b.ltp, change: b.change, change_percent: b.change_percent } : prev));
+    if (s) setSensex((prev) => (prev ? { ...prev, last_price: s.ltp, change: s.change, change_percent: s.change_percent } : prev));
+    if (n || b || s) setIndicesSource("upstox");
+  }, [live]);
+
+  useEffect(() => {
+    const q = live[selectedSymbol];
+    if (!q) return;
+    setQuote((prev) => (prev ? { ...prev, last_price: q.ltp, change: q.change, change_percent: q.change_percent } : prev));
+  }, [live, selectedSymbol]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -152,9 +179,9 @@ export default function TradePage() {
   const estFill = currentLtp > 0
     ? simulateFill({ symbol: selectedSymbol, exchange: selectedExchange, instrument_type: instrumentType, option_type: isOption ? instrumentType : null, strike_price: selectedStrike, expiry_date: selectedExpiry, lot_size: lotSize, order_type: orderType, trade_type: tradeType, quantity: totalShares, price: orderType === "LIMIT" ? parseFloat(orderPrice) || null : null, trigger_price: (orderType === "SL" || orderType === "SL-M") ? parseFloat(orderTrigger) || null : null, notes: null }, currentLtp)
     : null;
-  const charges = estFill ? estFill.brokerage + estFill.slippage : 20;
+  const charges = estFill ? estFill.total_charges : 20;
   const totalValue = grossValue + charges;
-  const cashAfter = tradeType === "BUY" ? virtualCash - totalValue : virtualCash + grossValue - 20;
+  const cashAfter = tradeType === "BUY" ? virtualCash - totalValue : virtualCash + grossValue - charges;
   const canAfford = tradeType === "BUY" ? cashAfter >= 0 : true;
 
   async function handlePlaceOrder() {
@@ -163,8 +190,8 @@ export default function TradePage() {
     const result = await placeOrder(userId, od);
     setPlacing(false);
     if (result.success) {
-      setVirtualCash((p) => tradeType === "BUY" ? p - totalValue : p + grossValue - 20);
-      setOrderSuccess({ msg: `${tradeType === "BUY" ? "Bought" : "Sold"} ${isOption ? `${orderQty} lot` : `${totalShares} shares`} of ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} at ${INR}${(result.fill?.executed_price ?? effectivePrice).toFixed(2)}`, detail: tradeType === "BUY" ? `${INR}${totalValue.toLocaleString("en-IN", { maximumFractionDigits: 0 })} deducted` : `${INR}${(grossValue - 20).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited` });
+      setVirtualCash((p) => tradeType === "BUY" ? p - totalValue : p + grossValue - charges);
+      setOrderSuccess({ msg: `${tradeType === "BUY" ? "Bought" : "Sold"} ${isOption ? `${orderQty} lot` : `${totalShares} shares`} of ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} at ${INR}${(result.fill?.executed_price ?? effectivePrice).toFixed(2)}`, detail: tradeType === "BUY" ? `${INR}${totalValue.toLocaleString("en-IN", { maximumFractionDigits: 0 })} deducted` : `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited` });
     } else { showToast(result.message, "error"); setConfirmStep(false); }
   }
 
@@ -196,9 +223,10 @@ export default function TradePage() {
       {/* Default — index cards */}
       {!query.trim() && (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <IndexQuickCard data={nifty} label="NIFTY 50" source={ls} onTrade={() => openTradeModal("NIFTY", "Nifty 50", "NSE")} />
             <IndexQuickCard data={bankNifty} label="BANK NIFTY" source={ls} onTrade={() => openTradeModal("BANKNIFTY", "Bank Nifty", "NSE")} />
+            <IndexQuickCard data={sensex} label="SENSEX" source={ls} exchange="BSE" onTrade={() => openTradeModal("SENSEX", "Sensex", "BSE")} />
           </div>
           <p className="text-center text-xs text-gray-600">Or search for any stock or index above</p>
         </>
@@ -490,6 +518,11 @@ export default function TradePage() {
                 ].map(([k, v]) => (
                   <div key={k} className="flex justify-between"><span className="text-xs text-gray-400">{k}</span><span className="text-sm text-white">{v}</span></div>
                 ))}
+                {estFill?.charges && (
+                  <p className="text-[10px] text-gray-500 leading-tight">
+                    Incl. brokerage {INR}{estFill.charges.brokerage.toFixed(0)}, STT {INR}{estFill.charges.stt.toFixed(2)}, txn+SEBI+stamp+GST {INR}{(estFill.charges.txn + estFill.charges.sebi + estFill.charges.stamp + estFill.charges.gst).toFixed(2)}
+                  </p>
+                )}
                 <div className="flex justify-between border-t border-gray-700 pt-1.5 mt-1"><span className="text-xs text-gray-400 font-medium">Total</span><span className="text-sm font-bold text-white">{INR}{totalValue.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span></div>
                 <div className="flex justify-between"><span className="text-xs text-gray-400">Balance</span><span className="text-sm text-white">{INR}{virtualCash.toLocaleString("en-IN")}</span></div>
                 <div className="flex justify-between"><span className="text-xs text-gray-400">After</span><span className={`text-sm font-medium ${canAfford ? "text-green-400" : "text-red-400"}`}>{INR}{cashAfter.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span></div>
@@ -524,11 +557,11 @@ export default function TradePage() {
   );
 }
 
-function IndexQuickCard({ data, label, source, onTrade }: { data: MarketData | null; label: string; source: string; onTrade: () => void }) {
+function IndexQuickCard({ data, label, source, onTrade, exchange = "NSE" }: { data: MarketData | null; label: string; source: string; onTrade: () => void; exchange?: string }) {
   return (
     <button onClick={onTrade} className="w-full bg-gray-900 border border-gray-800 rounded-2xl p-5 text-left cursor-pointer hover:border-violet-500/30 hover:-translate-y-1 transition-all duration-200">
       <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2"><span className="text-sm font-bold text-white">{label}</span><span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">NSE</span></div>
+        <div className="flex items-center gap-2"><span className="text-sm font-bold text-white">{label}</span><span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">{exchange}</span></div>
         <LiveBadge source={source as "dhan" | "upstox" | "demo"} lastUpdated={data?.last_updated ?? null} />
       </div>
       {data ? (

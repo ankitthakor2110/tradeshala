@@ -1,8 +1,16 @@
-import type { MarketData, StockGainerLoser } from "@/types/database";
+import type { MarketData, StockGainerLoser, OptionLeg } from "@/types/database";
+
+export interface OptionGreeks {
+  ltp: number;
+  delta: number;
+  theta: number;
+  iv: number;
+}
 
 interface IndicesResponse {
   nifty50: MarketData | null;
   bankNifty: MarketData | null;
+  sensex?: MarketData | null;
   source: string;
   last_updated: string;
 }
@@ -40,6 +48,62 @@ export async function getStockQuote(
     );
     if (!res.ok) return null;
     return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Looks up the live premium (LTP) of a specific option contract from the
+ * option chain. Used by the trade engine so option fills price the contract
+ * itself, not the underlying spot.
+ */
+export async function getOptionLtp(
+  symbol: string,
+  expiry: string | null,
+  strike: number | null,
+  side: "CE" | "PE"
+): Promise<number | null> {
+  try {
+    if (!expiry || strike == null) return null;
+    const res = await fetch(
+      `/api/trade/option-chain?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiry)}`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const chain: { strike_price: number; ce?: { ltp?: number }; pe?: { ltp?: number } }[] =
+      data.chain ?? [];
+    const row = chain.find((r) => r.strike_price === strike);
+    if (!row) return null;
+    const ltp = side === "CE" ? row.ce?.ltp : row.pe?.ltp;
+    return typeof ltp === "number" && ltp > 0 ? ltp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Greeks (Δ/Θ/IV) + LTP for a specific option contract, from the option chain.
+ * Used to show per-position risk in the detail drawer.
+ */
+export async function getOptionGreeks(
+  symbol: string,
+  expiry: string | null,
+  strike: number | null,
+  side: "CE" | "PE"
+): Promise<OptionGreeks | null> {
+  try {
+    if (!expiry || strike == null) return null;
+    const res = await fetch(
+      `/api/trade/option-chain?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiry)}`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const chain: { strike_price: number; ce?: OptionLeg; pe?: OptionLeg }[] = data.chain ?? [];
+    const row = chain.find((r) => r.strike_price === strike);
+    const leg = side === "CE" ? row?.ce : row?.pe;
+    if (!leg) return null;
+    return { ltp: leg.ltp ?? 0, delta: leg.delta ?? 0, theta: leg.theta ?? 0, iv: leg.iv ?? 0 };
   } catch {
     return null;
   }

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { decryptSecret, encryptSecret } from "@/lib/crypto/secrets";
 import type { BrokerConnection } from "@/types/database";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
@@ -35,7 +36,7 @@ async function handleUpstox(
   const body = new URLSearchParams({
     code,
     client_id: connection.api_key ?? "",
-    client_secret: connection.api_secret ?? "",
+    client_secret: decryptSecret(connection.api_secret) ?? "",
     redirect_uri: redirectUri,
     grant_type: "authorization_code",
   });
@@ -69,7 +70,7 @@ async function handleUpstox(
   await supabase
     .from("broker_connections")
     .update({
-      access_token: accessToken,
+      access_token: encryptSecret(accessToken),
       is_connected: true,
       is_active: true,
       token_expiry: getMidnightIST(),
@@ -95,7 +96,7 @@ async function handleZerodha(
   connection: BrokerConnection
 ): Promise<Response> {
   const apiKey = connection.api_key ?? "";
-  const apiSecret = connection.api_secret ?? "";
+  const apiSecret = decryptSecret(connection.api_secret) ?? "";
 
   // Build SHA-256 checksum: sha256(api_key + request_token + api_secret)
   const checksumInput = apiKey + code + apiSecret;
@@ -140,7 +141,7 @@ async function handleZerodha(
   await supabase
     .from("broker_connections")
     .update({
-      access_token: accessToken,
+      access_token: encryptSecret(accessToken),
       is_connected: true,
       is_active: true,
       token_expiry: getMidnightIST(),
@@ -171,9 +172,9 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const [brokerId, userId] = state.split(":");
+    const [brokerId, stateUserId] = state.split(":");
 
-    if (!brokerId || !userId) {
+    if (!brokerId || !stateUserId) {
       return redirectWithStatus("error", {
         message: "Invalid state parameter format",
       });
@@ -186,8 +187,27 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Fetch saved credentials for this broker
+    // Derive the user from the authenticated session — never trust the user id
+    // carried in the URL. The `state` value is then validated against the
+    // session as a CSRF check (it must match the user who initiated the flow).
     const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return redirectWithStatus("error", { message: "Not signed in" });
+    }
+
+    if (stateUserId !== user.id) {
+      return redirectWithStatus("error", {
+        message: "State mismatch — possible CSRF. Please retry the connection.",
+      });
+    }
+
+    const userId = user.id;
+
+    // Fetch saved credentials for this broker
     const { data: connection } = await supabase
       .from("broker_connections")
       .select("*")
