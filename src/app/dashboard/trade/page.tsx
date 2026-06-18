@@ -8,7 +8,7 @@ import { searchStocks, getStockQuote, getIndicesData } from "@/services/market-d
 import { TRADE_CONFIG } from "@/config/trade";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { getPnLColor } from "@/utils/colors";
-import { formatOI } from "@/utils/format";
+import { formatOI, formatPercent } from "@/utils/format";
 import {
   ComposedChart,
   Line,
@@ -71,6 +71,7 @@ type OrderType = "MARKET" | "LIMIT" | "SL" | "SL-M";
 export default function TradePage() {
   const mounted = useIsMounted();
   const placeOrderRef = useRef<HTMLDivElement>(null);
+  const placeActionRef = useRef<() => void>(() => {});
 
   const [userId, setUserId] = useState("");
   const [virtualCash, setVirtualCash] = useState(1000000);
@@ -109,6 +110,9 @@ export default function TradePage() {
   const [orderQty, setOrderQty] = useState(1);
   const [orderPrice, setOrderPrice] = useState("");
   const [orderTrigger, setOrderTrigger] = useState("");
+  const [slPrice, setSlPrice] = useState("");
+  const [targetPrice, setTargetPrice] = useState("");
+  const [riskAmount, setRiskAmount] = useState("");
   const [orderNotes, setOrderNotes] = useState("");
   const [showNotes, setShowNotes] = useState(false);
   const [placing, setPlacing] = useState(false);
@@ -210,6 +214,7 @@ export default function TradePage() {
     setSelectedSymbol(symbol); setSelectedName(name); setSelectedExchange(exchange);
     setInstrumentType("CE"); setTradeType("BUY"); setOrderType("MARKET"); setOrderQty(1);
     setOrderPrice(""); setOrderTrigger(""); setOrderNotes(""); setShowNotes(false);
+    setSlPrice(""); setTargetPrice(""); setRiskAmount("");
     setConfirmStep(false); setOrderSuccess(null); setQuote(null);
     setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide("CE"); setFlashStrike(null);
     setModalOpen(true); fetchQuote(symbol, exchange);
@@ -217,6 +222,7 @@ export default function TradePage() {
 
   function handleStrikeSelect(strike: number, ltp: number, side: "CE" | "PE") {
     setSelectedStrike(strike); setSelectedOptionLtp(ltp); setInstrumentType(side); setSelectedSide(side);
+    setSlPrice(""); setTargetPrice("");
     setFlashStrike(strike);
     setTimeout(() => setFlashStrike(null), 300);
     setTimeout(() => placeOrderRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 200);
@@ -227,6 +233,27 @@ export default function TradePage() {
   const currentLtp = isOption && selectedOptionLtp ? selectedOptionLtp : (quote?.last_price ?? 0);
   const effectivePrice = orderType === "LIMIT" && orderPrice ? parseFloat(orderPrice) : currentLtp;
   const totalShares = isOption ? orderQty * lotSize : orderQty;
+
+  const selectedDelta = useMemo(() => {
+    if (!selectedStrike) return null;
+    const row = chain.find((r) => r.strike_price === selectedStrike);
+    if (!row) return null;
+    return selectedSide === "PE" ? row.pe.delta : row.ce.delta;
+  }, [chain, selectedStrike, selectedSide]);
+
+  const numOrNull = (s: string) => {
+    const n = parseFloat(s);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const applyRiskSizing = () => {
+    const amt = parseFloat(riskAmount);
+    const sl = parseFloat(slPrice);
+    if (!Number.isFinite(amt) || amt <= 0 || !Number.isFinite(sl)) return;
+    const riskPerLot = (effectivePrice - sl) * lotSize;
+    if (riskPerLot <= 0) return;
+    setOrderQty(Math.max(1, Math.floor(amt / riskPerLot)));
+  };
   const grossValue = effectivePrice * totalShares;
   const estFill = currentLtp > 0
     ? simulateFill({ symbol: selectedSymbol, exchange: selectedExchange, instrument_type: instrumentType, option_type: isOption ? instrumentType : null, strike_price: selectedStrike, expiry_date: selectedExpiry, lot_size: lotSize, order_type: orderType, trade_type: tradeType, quantity: totalShares, price: orderType === "LIMIT" ? parseFloat(orderPrice) || null : null, trigger_price: (orderType === "SL" || orderType === "SL-M") ? parseFloat(orderTrigger) || null : null, notes: null }, currentLtp)
@@ -239,13 +266,43 @@ export default function TradePage() {
   async function handlePlaceOrder() {
     setPlacing(true);
     const od: OrderFormData = { symbol: selectedSymbol, exchange: selectedExchange, instrument_type: instrumentType, option_type: isOption ? instrumentType : null, strike_price: selectedStrike, expiry_date: selectedExpiry, lot_size: lotSize, order_type: orderType, trade_type: tradeType, quantity: totalShares, price: orderType === "LIMIT" ? parseFloat(orderPrice) || null : null, trigger_price: (orderType === "SL" || orderType === "SL-M") ? parseFloat(orderTrigger) || null : null, notes: orderNotes || null };
-    const result = await placeOrder(userId, od);
+    const result = await placeOrder(
+      userId,
+      od,
+      tradeType === "BUY" ? { stop_loss: numOrNull(slPrice), target: numOrNull(targetPrice) } : undefined
+    );
     setPlacing(false);
     if (result.success) {
       setVirtualCash((p) => tradeType === "BUY" ? p - totalValue : p + grossValue - charges);
       setOrderSuccess({ msg: `${tradeType === "BUY" ? "Bought" : "Sold"} ${isOption ? `${orderQty} lot` : `${totalShares} shares`} of ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} at ${INR}${(result.fill?.executed_price ?? effectivePrice).toFixed(2)}`, detail: tradeType === "BUY" ? `${INR}${totalValue.toLocaleString("en-IN", { maximumFractionDigits: 0 })} deducted` : `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited` });
     } else { showToast(result.message, "error"); setConfirmStep(false); }
   }
+
+  // Keep the latest place-action available to the Enter shortcut (no stale closures).
+  useEffect(() => {
+    placeActionRef.current = () => {
+      if (placing || !canAfford || currentLtp <= 0) return;
+      if (confirmStep || fastMode) handlePlaceOrder();
+      else setConfirmStep(true);
+    };
+  });
+
+  // Keyboard shortcuts while the trade modal is open (ignored when typing).
+  useEffect(() => {
+    if (!modalOpen) return;
+    function onKey(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const k = e.key.toLowerCase();
+      if (k === "b") { setTradeType("BUY"); e.preventDefault(); }
+      else if (k === "s") { setTradeType("SELL"); e.preventDefault(); }
+      else if (k === "+" || k === "=" || k === "arrowup") { setOrderQty((q) => q + 1); e.preventDefault(); }
+      else if (k === "-" || k === "arrowdown") { setOrderQty((q) => Math.max(1, q - 1)); e.preventDefault(); }
+      else if (k === "enter") { placeActionRef.current(); e.preventDefault(); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [modalOpen]);
 
   if (!mounted) return null;
   const ls = indicesSource === "dhan" || indicesSource === "upstox" ? indicesSource : "demo";
@@ -571,6 +628,53 @@ export default function TradePage() {
               : <textarea value={orderNotes} onChange={(e) => setOrderNotes(e.target.value)} placeholder="Trade notes..." rows={2}
                   className={`w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 resize-none cursor-text ${INTERACTION_CLASSES.formInput}`} />}
 
+              {/* Bracket (SL / Target) + R:R + risk sizing — BUY only */}
+              {isOption && selectedStrike && tradeType === "BUY" && currentLtp > 0 && (() => {
+                const entry = effectivePrice;
+                const sl = parseFloat(slPrice);
+                const tgt = parseFloat(targetPrice);
+                const hasSL = Number.isFinite(sl) && sl > 0;
+                const hasTgt = Number.isFinite(tgt) && tgt > 0;
+                const risk = hasSL ? entry - sl : null;
+                const reward = hasTgt ? tgt - entry : null;
+                const rr = risk && risk > 0 && reward != null ? reward / risk : null;
+                return (
+                  <div className="bg-gray-800 rounded-lg p-3 space-y-2">
+                    <p className="text-xs font-semibold text-gray-300">Bracket — auto SL &amp; target</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Stop-loss</label>
+                        <input type="number" step="0.05" value={slPrice} onChange={(e) => setSlPrice(e.target.value)} placeholder={`< ${entry.toFixed(2)}`}
+                          className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Target</label>
+                        <input type="number" step="0.05" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} placeholder={`> ${entry.toFixed(2)}`}
+                          className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+                      {rr != null && <span className="text-gray-400">R:R <span className="text-white font-medium">1 : {rr.toFixed(2)}</span></span>}
+                      {risk != null && risk > 0 && <span className="text-gray-400">Risk <span className="text-red-400 font-medium">{INR}{(risk * totalShares).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span></span>}
+                      {reward != null && reward > 0 && <span className="text-gray-400">Reward <span className="text-green-400 font-medium">{INR}{(reward * totalShares).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span></span>}
+                      {selectedDelta != null && <span className="text-gray-400">Prob. ITM <span className="text-white font-medium">{formatPercent(Math.abs(selectedDelta) * 100)}</span></span>}
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1">
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Risk budget ({INR})</label>
+                        <input type="number" value={riskAmount} onChange={(e) => setRiskAmount(e.target.value)} placeholder="e.g. 2000"
+                          className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                      </div>
+                      <button onClick={applyRiskSizing} disabled={!hasSL}
+                        className="text-xs px-3 py-1.5 rounded-md border border-violet-500/40 text-violet-300 hover:bg-violet-500/10 cursor-pointer active:scale-95 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed">
+                        Size by risk
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-600">SL/Target attach to the position and auto-close (whichever hits first) from the Positions page.</p>
+                  </div>
+                );
+              })()}
+
               {/* Breakeven, max P&L, payoff */}
               {isOption && selectedStrike && currentLtp > 0 && (() => {
                 const premium = effectivePrice;
@@ -642,6 +746,7 @@ export default function TradePage() {
                 />
                 {"⚡"} Fast mode — place instantly without confirmation
               </label>
+              <p className="text-[10px] text-gray-600 -mt-1">Shortcuts: <span className="text-gray-400">B</span>/<span className="text-gray-400">S</span> side · <span className="text-gray-400">↑↓</span> qty · <span className="text-gray-400">Enter</span> place</p>
 
               {/* Place / Confirm */}
               <div ref={placeOrderRef}>
