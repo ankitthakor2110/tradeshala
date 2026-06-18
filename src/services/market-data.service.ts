@@ -3,7 +3,9 @@ import type { MarketData, StockGainerLoser, OptionLeg } from "@/types/database";
 export interface OptionGreeks {
   ltp: number;
   delta: number;
+  gamma: number;
   theta: number;
+  vega: number;
   iv: number;
 }
 
@@ -103,7 +105,14 @@ export async function getOptionGreeks(
     const row = chain.find((r) => r.strike_price === strike);
     const leg = side === "CE" ? row?.ce : row?.pe;
     if (!leg) return null;
-    return { ltp: leg.ltp ?? 0, delta: leg.delta ?? 0, theta: leg.theta ?? 0, iv: leg.iv ?? 0 };
+    return {
+      ltp: leg.ltp ?? 0,
+      delta: leg.delta ?? 0,
+      gamma: leg.gamma ?? 0,
+      theta: leg.theta ?? 0,
+      vega: leg.vega ?? 0,
+      iv: leg.iv ?? 0,
+    };
   } catch {
     return null;
   }

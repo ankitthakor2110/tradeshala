@@ -301,7 +301,9 @@ export interface OptionLeg {
   volume: number;
   iv: number;
   delta: number;
+  gamma: number;
   theta: number;
+  vega: number;
 }
 
 export interface OptionChainData {

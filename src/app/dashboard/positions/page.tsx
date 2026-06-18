@@ -30,6 +30,7 @@ import { useIsMounted } from "@/hooks/useIsMounted";
 import { usePositions, type PositionView } from "@/hooks/usePositions";
 import { closePosition, addToPosition } from "@/services/trade-engine.service";
 import { getRecentOrders, setPositionRisk } from "@/services/positions.service";
+import { getMarketStatus } from "@/services/dashboard.service";
 import { getOptionGreeks, type OptionGreeks } from "@/services/market-data.service";
 import { showToast } from "@/components/ui/Toast";
 import type { Order } from "@/types/database";
@@ -391,9 +392,11 @@ function PositionDetail({
       </div>
 
       {p.instrument_type !== "EQ" && greeks && (
-        <div className="grid grid-cols-3 gap-3 text-xs mb-3 bg-gray-800/40 rounded-lg p-2">
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 text-xs mb-3 bg-gray-800/40 rounded-lg p-2">
           <div><p className="text-gray-500">Delta</p><p className="text-white font-medium">{greeks.delta.toFixed(2)}</p></div>
+          <div><p className="text-gray-500">Gamma</p><p className="text-white font-medium">{greeks.gamma.toFixed(3)}</p></div>
           <div><p className="text-gray-500">Theta</p><p className="text-white font-medium">{greeks.theta.toFixed(2)}</p></div>
+          <div><p className="text-gray-500">Vega</p><p className="text-white font-medium">{greeks.vega.toFixed(2)}</p></div>
           <div><p className="text-gray-500">IV</p><p className="text-white font-medium">{greeks.iv.toFixed(2)}%</p></div>
         </div>
       )}
@@ -563,16 +566,43 @@ export default function PositionsPage() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [grouped, setGrouped] = useState(false);
+  const [autoSquareOff, setAutoSquareOff] = useState(false);
   const [addingId, setAddingId] = useState<string | null>(null);
   const [savingRiskId, setSavingRiskId] = useState<string | null>(null);
   const [fills, setFills] = useState<Order[]>([]);
   const [fillsLoading, setFillsLoading] = useState(false);
   const [greeks, setGreeks] = useState<OptionGreeks | null>(null);
-  const [netGreeks, setNetGreeks] = useState<{ delta: number; theta: number; count: number } | null>(null);
+  const [netGreeks, setNetGreeks] = useState<{ delta: number; theta: number; vega: number; count: number } | null>(null);
   const triggeredRef = useRef<Set<string>>(new Set());
   const alertedRef = useRef<Set<string>>(new Set());
   const prevPriceRef = useRef<Map<string, number>>(new Map());
   const trailPeakRef = useRef<Map<string, number>>(new Map());
+  const squaredOffRef = useRef(false);
+
+  // Load persisted auto-square-off preference (client-only).
+  useEffect(() => {
+    setAutoSquareOff(localStorage.getItem("ts_auto_squareoff") === "1");
+  }, []);
+
+  // Auto square-off: close all open positions at the cutoff during market hours.
+  useEffect(() => {
+    if (!autoSquareOff) return;
+    const check = () => {
+      if (squaredOffRef.current || openPositions.length === 0) return;
+      const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      const mins = ist.getHours() * 60 + ist.getMinutes();
+      const cutoff = POSITIONS_CONFIG.squareOff.hour * 60 + POSITIONS_CONFIG.squareOff.minute;
+      if (getMarketStatus() && mins >= cutoff) {
+        squaredOffRef.current = true;
+        showToast("Auto square-off — closing all open positions", "info");
+        handleCloseAll();
+      }
+    };
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSquareOff, openPositions]);
 
   const toggleExpand = useCallback(
     async (p: PositionView) => {
@@ -789,15 +819,17 @@ export default function PositionsPage() {
       if (!active) return;
       let delta = 0;
       let theta = 0;
+      let vega = 0;
       let any = false;
       results.forEach((g, i) => {
         if (g) {
           any = true;
           delta += g.delta * opts[i].quantity;
           theta += g.theta * opts[i].quantity;
+          vega += g.vega * opts[i].quantity;
         }
       });
-      setNetGreeks(any ? { delta, theta, count: opts.length } : null);
+      setNetGreeks(any ? { delta, theta, vega, count: opts.length } : null);
     })();
     return () => {
       active = false;
@@ -1136,7 +1168,7 @@ export default function PositionsPage() {
             <h3 className="text-sm md:text-base font-semibold text-white">Options book — net Greeks</h3>
             <span className="text-xs text-gray-400">{netGreeks.count} option positions</span>
           </div>
-          <div className="grid grid-cols-2 gap-3 text-xs">
+          <div className="grid grid-cols-3 gap-3 text-xs">
             <div>
               <p className="text-gray-500">Net Delta</p>
               <p className={`font-medium ${getPnLColor(netGreeks.delta)}`}>{netGreeks.delta.toFixed(2)}</p>
@@ -1144,6 +1176,10 @@ export default function PositionsPage() {
             <div>
               <p className="text-gray-500">Net Theta</p>
               <p className={`font-medium ${getPnLColor(netGreeks.theta)}`}>{netGreeks.theta.toFixed(2)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Net Vega</p>
+              <p className={`font-medium ${getPnLColor(netGreeks.vega)}`}>{netGreeks.vega.toFixed(2)}</p>
             </div>
           </div>
           <p className="text-[10px] text-gray-600 mt-2">
@@ -1286,6 +1322,18 @@ export default function PositionsPage() {
           className="text-xs px-3 py-2 rounded-lg border border-gray-700 text-gray-300 hover:border-violet-500/50 cursor-pointer active:scale-95 transition-all duration-200"
         >
           Export CSV
+        </button>
+        <button
+          onClick={() => {
+            const v = !autoSquareOff;
+            setAutoSquareOff(v);
+            localStorage.setItem("ts_auto_squareoff", v ? "1" : "0");
+            if (v) squaredOffRef.current = false;
+          }}
+          title="Close all open positions at 15:20 IST while this page is open"
+          className={`text-xs px-3 py-2 rounded-lg border cursor-pointer active:scale-95 transition-all duration-200 ${autoSquareOff ? "border-amber-500/50 text-amber-400 bg-amber-500/10" : "border-gray-700 text-gray-300 hover:border-violet-500/50"}`}
+        >
+          Auto SQ-off 15:20
         </button>
       </div>
 

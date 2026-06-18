@@ -4,6 +4,7 @@ export const POSITIONS_CONFIG = {
     subtitle: "Track your open and closed positions",
   },
   refreshInterval: 5000,
+  squareOff: { hour: 15, minute: 20 },
   tabs: {
     open: "Open Positions",
     closed: "Closed Positions",
