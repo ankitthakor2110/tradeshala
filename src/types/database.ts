@@ -230,6 +230,7 @@ export interface Position {
   stop_loss: number | null;
   target: number | null;
   alert_price: number | null;
+  trail_amount: number | null;
   opened_at: string;
   closed_at: string | null;
   updated_at: string;

@@ -75,7 +75,12 @@ export async function getRecentOrders(
 /** Persists SL / Target / Alert levels on a position (null clears a level). */
 export async function setPositionRisk(
   positionId: string,
-  fields: { stop_loss?: number | null; target?: number | null; alert_price?: number | null }
+  fields: {
+    stop_loss?: number | null;
+    target?: number | null;
+    alert_price?: number | null;
+    trail_amount?: number | null;
+  }
 ): Promise<boolean> {
   try {
     const supabase = createClient();

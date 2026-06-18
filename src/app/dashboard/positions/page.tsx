@@ -11,6 +11,7 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  ReferenceLine,
   Cell,
 } from "recharts";
 import {
@@ -165,6 +166,95 @@ function lotAlignedQty(fraction: number, p: PositionView): number {
   return Math.min(p.quantity, lots * p.lot_size);
 }
 
+// P&L of a long option position at expiry across a range of underlying prices.
+function payoffPoints(p: PositionView): { s: number; pnl: number }[] {
+  const strike = p.strike_price ?? 0;
+  if (!strike) return [];
+  const premium = p.average_price; // per option
+  const qty = p.quantity;
+  const lo = strike * 0.9;
+  const hi = strike * 1.1;
+  const steps = 25;
+  const pts: { s: number; pnl: number }[] = [];
+  for (let i = 0; i < steps; i++) {
+    const s = lo + ((hi - lo) * i) / (steps - 1);
+    const intrinsic =
+      p.instrument_type === "CE" ? Math.max(0, s - strike) : Math.max(0, strike - s);
+    pts.push({ s: Math.round(s), pnl: Math.round((intrinsic - premium) * qty) });
+  }
+  return pts;
+}
+
+interface Analytics {
+  total: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  profitFactor: number;
+  profitFactorInfinite: boolean;
+  expectancy: number;
+  avgWin: number;
+  avgLoss: number;
+  maxDrawdown: number;
+  largestWin: number;
+  largestLoss: number;
+  streak: number;
+  streakType: "win" | "loss" | null;
+}
+
+// Trading performance metrics from realized P&L of closed positions.
+// `closed` is newest-first (as returned by the service).
+function computeAnalytics(closed: PositionView[]): Analytics {
+  const realized = closed.map((p) => p.realized_pnl || 0);
+  const wins = realized.filter((r) => r > 0);
+  const losses = realized.filter((r) => r < 0);
+  const grossProfit = wins.reduce((s, r) => s + r, 0);
+  const grossLoss = Math.abs(losses.reduce((s, r) => s + r, 0));
+  const total = closed.length;
+
+  // Max drawdown of the cumulative realized curve (walk chronologically).
+  let cum = 0;
+  let peak = 0;
+  let maxDrawdown = 0;
+  for (let i = closed.length - 1; i >= 0; i--) {
+    cum += closed[i].realized_pnl || 0;
+    peak = Math.max(peak, cum);
+    maxDrawdown = Math.min(maxDrawdown, cum - peak);
+  }
+
+  // Current win/loss streak (newest-first).
+  let streak = 0;
+  let streakType: "win" | "loss" | null = null;
+  for (const p of closed) {
+    const r = p.realized_pnl || 0;
+    if (r === 0) break;
+    const t: "win" | "loss" = r > 0 ? "win" : "loss";
+    if (streakType === null) {
+      streakType = t;
+      streak = 1;
+    } else if (streakType === t) {
+      streak += 1;
+    } else break;
+  }
+
+  return {
+    total,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: total ? (wins.length / total) * 100 : 0,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : 0,
+    profitFactorInfinite: grossLoss === 0 && grossProfit > 0,
+    expectancy: total ? realized.reduce((s, r) => s + r, 0) / total : 0,
+    avgWin: wins.length ? grossProfit / wins.length : 0,
+    avgLoss: losses.length ? grossLoss / losses.length : 0,
+    maxDrawdown,
+    largestWin: wins.length ? Math.max(...wins) : 0,
+    largestLoss: losses.length ? Math.min(...losses) : 0,
+    streak,
+    streakType,
+  };
+}
+
 interface TooltipPayload {
   value: number;
   dataKey: string;
@@ -248,7 +338,12 @@ function PositionDetail({
   p: PositionView;
   onClose: (qty: number) => void;
   onAdd: (qty: number) => void;
-  onSaveRisk: (fields: { stop_loss: number | null; target: number | null; alert_price: number | null }) => void;
+  onSaveRisk: (fields: {
+    stop_loss: number | null;
+    target: number | null;
+    alert_price: number | null;
+    trail_amount: number | null;
+  }) => void;
   closing: boolean;
   adding: boolean;
   savingRisk: boolean;
@@ -261,6 +356,7 @@ function PositionDetail({
   const [sl, setSl] = useState(p.stop_loss != null ? String(p.stop_loss) : "");
   const [tgt, setTgt] = useState(p.target != null ? String(p.target) : "");
   const [alertPrice, setAlertPrice] = useState(p.alert_price != null ? String(p.alert_price) : "");
+  const [trail, setTrail] = useState(p.trail_amount != null ? String(p.trail_amount) : "");
   const numOrNull = (s: string) => {
     const n = parseFloat(s);
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -299,6 +395,34 @@ function PositionDetail({
           <div><p className="text-gray-500">Delta</p><p className="text-white font-medium">{greeks.delta.toFixed(2)}</p></div>
           <div><p className="text-gray-500">Theta</p><p className="text-white font-medium">{greeks.theta.toFixed(2)}</p></div>
           <div><p className="text-gray-500">IV</p><p className="text-white font-medium">{greeks.iv.toFixed(2)}%</p></div>
+        </div>
+      )}
+
+      {p.instrument_type !== "EQ" && p.strike_price != null && (
+        <div className="mb-3">
+          <p className="text-xs text-gray-400 mb-1">Payoff at expiry</p>
+          <div className="h-40 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={payoffPoints(p)} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
+                <YAxis
+                  stroke="#6b7280"
+                  fontSize={10}
+                  tickLine={false}
+                  axisLine={false}
+                  tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)}
+                />
+                <Tooltip
+                  formatter={(v) => formatIndianCurrency(Number(v), { sign: true })}
+                  labelFormatter={(l) => `Underlying ${l}`}
+                  contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }}
+                />
+                <ReferenceLine y={0} stroke="#4b5563" />
+                <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       )}
 
@@ -367,8 +491,12 @@ function PositionDetail({
           <p className="text-[10px] text-gray-500 mb-0.5">Alert</p>
           <input type="number" value={alertPrice} onChange={(e) => setAlertPrice(e.target.value)} placeholder="—" className={`w-24 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`} />
         </div>
+        <div>
+          <p className="text-[10px] text-gray-500 mb-0.5">Trail by</p>
+          <input type="number" value={trail} onChange={(e) => setTrail(e.target.value)} placeholder="—" className={`w-24 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`} />
+        </div>
         <button
-          onClick={() => onSaveRisk({ stop_loss: numOrNull(sl), target: numOrNull(tgt), alert_price: numOrNull(alertPrice) })}
+          onClick={() => onSaveRisk({ stop_loss: numOrNull(sl), target: numOrNull(tgt), alert_price: numOrNull(alertPrice), trail_amount: numOrNull(trail) })}
           disabled={savingRisk}
           className={`${INTERACTION_CLASSES.secondaryButton} text-xs text-gray-200 px-3 py-1.5 rounded-md flex items-center gap-1.5`}
         >
@@ -376,7 +504,7 @@ function PositionDetail({
           Save
         </button>
       </div>
-      <p className="text-[10px] text-gray-600 mb-3">SL/Target auto-close while this page is open.</p>
+      <p className="text-[10px] text-gray-600 mb-3">SL / Target / Trailing auto-close while this page is open.</p>
 
       <div>
         <p className="text-xs text-gray-400 mb-1">Recent fills</p>
@@ -440,9 +568,11 @@ export default function PositionsPage() {
   const [fills, setFills] = useState<Order[]>([]);
   const [fillsLoading, setFillsLoading] = useState(false);
   const [greeks, setGreeks] = useState<OptionGreeks | null>(null);
+  const [netGreeks, setNetGreeks] = useState<{ delta: number; theta: number; count: number } | null>(null);
   const triggeredRef = useRef<Set<string>>(new Set());
   const alertedRef = useRef<Set<string>>(new Set());
   const prevPriceRef = useRef<Map<string, number>>(new Map());
+  const trailPeakRef = useRef<Map<string, number>>(new Map());
 
   const toggleExpand = useCallback(
     async (p: PositionView) => {
@@ -496,6 +626,20 @@ export default function PositionsPage() {
       return dir * ((av as number) - (bv as number));
     });
   }, [openPositions, search, sortKey, sortDir]);
+
+  const analytics = useMemo(() => computeAnalytics(closedPositions), [closedPositions]);
+
+  // Stable key over the option-position set (ignores live price ticks) so the
+  // net-Greeks fetch only re-runs when positions actually change.
+  const optionPositionsKey = useMemo(
+    () =>
+      openPositions
+        .filter((p) => p.instrument_type !== "EQ")
+        .map((p) => `${p.symbol}|${p.expiry_date}|${p.strike_price}|${p.instrument_type}|${p.quantity}`)
+        .sort()
+        .join(";"),
+    [openPositions]
+  );
 
   const exposure = useMemo(() => {
     const byUnderlying = new Map<string, number>();
@@ -565,14 +709,20 @@ export default function PositionsPage() {
   const handleSaveRisk = useCallback(
     async (
       positionId: string,
-      fields: { stop_loss: number | null; target: number | null; alert_price: number | null }
+      fields: {
+        stop_loss: number | null;
+        target: number | null;
+        alert_price: number | null;
+        trail_amount: number | null;
+      }
     ) => {
       setSavingRiskId(positionId);
       const ok = await setPositionRisk(positionId, fields);
       showToast(ok ? "Risk levels saved" : "Failed to save risk levels", ok ? "success" : "error");
-      // Re-arm triggers/alerts for the new levels.
+      // Re-arm triggers/alerts/trailing for the new levels.
       triggeredRef.current.delete(positionId);
       alertedRef.current.delete(positionId);
+      trailPeakRef.current.delete(positionId);
       await refresh();
       setSavingRiskId(null);
     },
@@ -590,7 +740,16 @@ export default function PositionsPage() {
         if (hitSL || hitTarget) {
           triggeredRef.current.add(p.id);
           showToast(`${p.symbol}: ${hitSL ? "Stop-loss" : "Target"} hit — closing`, hitSL ? "error" : "success");
-          // eslint-disable-next-line react-hooks/set-state-in-effect -- auto-close on live price cross
+          handleClosePosition(p.id);
+        }
+      }
+      // Trailing stop: ratchet the peak up; close if price falls trail below it.
+      if (!triggeredRef.current.has(p.id) && p.trail_amount != null && p.trail_amount > 0) {
+        const peak = Math.max(trailPeakRef.current.get(p.id) ?? ltp, ltp);
+        trailPeakRef.current.set(p.id, peak);
+        if (ltp <= peak - p.trail_amount) {
+          triggeredRef.current.add(p.id);
+          showToast(`${p.symbol}: trailing stop hit — closing`, "error");
           handleClosePosition(p.id);
         }
       }
@@ -607,6 +766,44 @@ export default function PositionsPage() {
       prevPriceRef.current.set(p.id, ltp);
     }
   }, [openPositions, handleClosePosition]);
+
+  // Aggregate net Greeks across open option positions (long-only book).
+  useEffect(() => {
+    const opts = openPositions.filter((p) => p.instrument_type !== "EQ");
+    if (opts.length === 0) {
+      setNetGreeks(null);
+      return;
+    }
+    let active = true;
+    (async () => {
+      const results = await Promise.all(
+        opts.map((p) =>
+          getOptionGreeks(
+            p.symbol,
+            p.expiry_date,
+            p.strike_price,
+            p.instrument_type === "PE" ? "PE" : "CE"
+          )
+        )
+      );
+      if (!active) return;
+      let delta = 0;
+      let theta = 0;
+      let any = false;
+      results.forEach((g, i) => {
+        if (g) {
+          any = true;
+          delta += g.delta * opts[i].quantity;
+          theta += g.theta * opts[i].quantity;
+        }
+      });
+      setNetGreeks(any ? { delta, theta, count: opts.length } : null);
+    })();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the option set, not live prices
+  }, [optionPositionsKey]);
 
   const handleCloseAll = useCallback(async () => {
     if (!userId) return;
@@ -928,6 +1125,115 @@ export default function PositionsPage() {
                   </span>
                 </span>
               ))}
+          </div>
+        </div>
+      )}
+
+      {/* Options book — net Greeks */}
+      {!loading && netGreeks && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-3 md:p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm md:text-base font-semibold text-white">Options book — net Greeks</h3>
+            <span className="text-xs text-gray-400">{netGreeks.count} option positions</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div>
+              <p className="text-gray-500">Net Delta</p>
+              <p className={`font-medium ${getPnLColor(netGreeks.delta)}`}>{netGreeks.delta.toFixed(2)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Net Theta</p>
+              <p className={`font-medium ${getPnLColor(netGreeks.theta)}`}>{netGreeks.theta.toFixed(2)}</p>
+            </div>
+          </div>
+          <p className="text-[10px] text-gray-600 mt-2">
+            Net Δ ≈ directional exposure per 1-point underlying move; net Θ ≈ daily time decay.
+          </p>
+        </div>
+      )}
+
+      {/* P&L heatmap */}
+      {!loading && openPositions.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-3 md:p-6">
+          <h3 className="text-sm md:text-base font-semibold text-white mb-3">P&L heatmap</h3>
+          <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+            {openPositions.map((p) => {
+              const pct = p.pnl_percent;
+              const intensity = Math.min(1, Math.abs(pct) / 10);
+              const bg =
+                pct > 0
+                  ? `rgba(34,197,94,${0.12 + intensity * 0.5})`
+                  : pct < 0
+                  ? `rgba(239,68,68,${0.12 + intensity * 0.5})`
+                  : "rgba(75,85,99,0.3)";
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setActiveTab("open");
+                    toggleExpand(p);
+                  }}
+                  style={{ backgroundColor: bg }}
+                  className="rounded-lg p-2 text-left cursor-pointer hover:ring-1 hover:ring-violet-400/50 active:scale-95 transition-all duration-200"
+                >
+                  <p className="text-[11px] font-semibold text-white truncate">{getInstrumentLabel(p)}</p>
+                  <p className="text-[10px] text-white/90">{formatPercent(pct, { sign: true })}</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Performance analytics */}
+      {!loading && analytics.total > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-3 md:p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm md:text-base font-semibold text-white">Performance</h3>
+            <span className="text-xs text-gray-400">{analytics.total} closed trades</span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 text-xs">
+            <div>
+              <p className="text-gray-500">Win rate</p>
+              <p className="text-white font-medium">
+                {formatPercent(analytics.winRate)}{" "}
+                <span className="text-gray-500">({analytics.wins}W/{analytics.losses}L)</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-gray-500">Profit factor</p>
+              <p className="text-white font-medium">
+                {analytics.profitFactorInfinite ? "∞" : analytics.profitFactor.toFixed(2)}
+              </p>
+            </div>
+            <div>
+              <p className="text-gray-500">Expectancy / trade</p>
+              <p className={`font-medium ${getPnLColor(analytics.expectancy)}`}>
+                {formatIndianCurrency(analytics.expectancy, { sign: true })}
+              </p>
+            </div>
+            <div>
+              <p className="text-gray-500">Current streak</p>
+              <p className="text-white font-medium">
+                {analytics.streakType ? `${analytics.streak} ${analytics.streakType}` : "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-gray-500">Avg win</p>
+              <p className="text-green-400 font-medium">{formatIndianCurrency(analytics.avgWin)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Avg loss</p>
+              <p className="text-red-400 font-medium">{formatIndianCurrency(-analytics.avgLoss)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Largest win</p>
+              <p className="text-green-400 font-medium">{formatIndianCurrency(analytics.largestWin, { sign: true })}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Max drawdown</p>
+              <p className="text-red-400 font-medium">{formatIndianCurrency(analytics.maxDrawdown)}</p>
+            </div>
           </div>
         </div>
       )}

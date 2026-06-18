@@ -158,6 +158,7 @@ create table if not exists public.positions (
   stop_loss       numeric,
   target          numeric,
   alert_price     numeric,
+  trail_amount    numeric,
   opened_at       timestamptz not null default now(),
   closed_at       timestamptz,
   updated_at      timestamptz not null default now()
@@ -278,6 +279,7 @@ alter table public.positions
   add column if not exists stop_loss numeric,
   add column if not exists target numeric,
   add column if not exists alert_price numeric,
+  add column if not exists trail_amount numeric,
   add column if not exists opened_at timestamptz not null default now(),
   add column if not exists closed_at timestamptz,
   add column if not exists updated_at timestamptz not null default now();
