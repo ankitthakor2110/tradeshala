@@ -9,6 +9,16 @@ import { TRADE_CONFIG } from "@/config/trade";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { getPnLColor } from "@/utils/colors";
 import { formatOI } from "@/utils/format";
+import {
+  ComposedChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
 import LiveBadge from "@/components/ui/LiveBadge";
 import Modal from "@/components/ui/Modal";
 import { showToast } from "@/components/ui/Toast";
@@ -22,6 +32,28 @@ const STRIKE_GAP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, FINNIFTY
 function calcAtm(price: number, symbol: string): number {
   const gap = STRIKE_GAP[symbol] ?? 5;
   return Math.round(price / gap) * gap;
+}
+
+// P&L at expiry for a single option leg across a range of underlying prices.
+function optionPayoff(
+  side: "CE" | "PE",
+  tradeType: "BUY" | "SELL",
+  strike: number,
+  premium: number,
+  totalQty: number
+): { s: number; pnl: number }[] {
+  if (!strike || totalQty <= 0) return [];
+  const lo = strike * 0.9;
+  const hi = strike * 1.1;
+  const steps = 25;
+  const pts: { s: number; pnl: number }[] = [];
+  for (let i = 0; i < steps; i++) {
+    const s = lo + ((hi - lo) * i) / (steps - 1);
+    const intrinsic = side === "CE" ? Math.max(0, s - strike) : Math.max(0, strike - s);
+    const longPnl = (intrinsic - premium) * totalQty;
+    pts.push({ s: Math.round(s), pnl: Math.round(tradeType === "BUY" ? longPnl : -longPnl) });
+  }
+  return pts;
 }
 
 function filterStrikes(chain: OptionChainData[], atm: number, symbol: string): OptionChainData[] {
@@ -81,7 +113,13 @@ export default function TradePage() {
   const [showNotes, setShowNotes] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [confirmStep, setConfirmStep] = useState(false);
+  const [fastMode, setFastMode] = useState(false);
   const [orderSuccess, setOrderSuccess] = useState<{ msg: string; detail: string } | null>(null);
+
+  // Load the persisted fast-mode preference (client-only).
+  useEffect(() => {
+    setFastMode(localStorage.getItem("ts_fast_mode") === "1");
+  }, []);
 
   useEffect(() => {
     getCurrentUser().then(async (user) => {
@@ -148,10 +186,24 @@ export default function TradePage() {
         const underlying = d.underlyingPrice ?? quote?.last_price ?? 0;
         const atm = calcAtm(underlying, selectedSymbol);
         setAtmStrike(atm);
-        setChain(filterStrikes(fullChain, atm, selectedSymbol));
+        const filtered = filterStrikes(fullChain, atm, selectedSymbol);
+        setChain(filtered);
+        // Smart default: preselect the ATM strike when nothing is chosen yet.
+        if (selectedStrike === null) {
+          const atmRow = filtered.find((r) => r.strike_price === atm);
+          if (atmRow) {
+            const side = instrumentType === "PE" ? "PE" : "CE";
+            setSelectedStrike(atm);
+            setSelectedSide(side);
+            setSelectedOptionLtp(side === "PE" ? atmRow.pe.ltp : atmRow.ce.ltp);
+          }
+        }
         setChainLoading(false);
       })
       .catch(() => { setChain([]); setChainLoading(false); });
+    // selectedStrike is read only to auto-select once; re-running on it would
+    // refetch the chain on every strike click.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol, selectedExpiry, instrumentType, quote?.last_price]);
 
   function openTradeModal(symbol: string, name: string, exchange: string) {
@@ -393,7 +445,7 @@ export default function TradePage() {
                                   <span className="text-green-400">{row.ce.bid.toFixed(1)}</span>/<span className="text-red-400">{row.ce.ask.toFixed(1)}</span>
                                 </td>
                               )}
-                              <td className="py-1.5 px-1.5 text-right cursor-pointer" onClick={() => handleStrikeSelect(row.strike_price, row.ce.ltp, "CE")}>
+                              <td className={`py-1.5 px-1.5 text-right cursor-pointer ${row.strike_price < atmStrike ? "bg-green-500/5" : ""}`} onClick={() => handleStrikeSelect(row.strike_price, row.ce.ltp, "CE")}>
                                 <span className={`font-semibold ${isSel && selectedSide === "CE" ? "text-green-300" : "text-green-400"} hover:text-green-300`}>
                                   {row.ce.ltp.toFixed(2)}{isSel && selectedSide === "CE" && " \u2713"}
                                 </span>
@@ -404,7 +456,7 @@ export default function TradePage() {
                                 {isMaxPain && <div className="text-[9px] text-yellow-400 font-normal">{"\u26A1"}MAX PAIN</div>}
                                 {row.pcr > 0 && <div className={`text-[9px] px-1 rounded mt-0.5 inline-block ${pcrBg}`}>{row.pcr > 1.2 ? "\uD83D\uDC02" : row.pcr < 0.8 ? "\uD83D\uDC3B" : "\u2696\uFE0F"}{row.pcr.toFixed(2)}</div>}
                               </td>
-                              <td className="py-1.5 px-1.5 text-left cursor-pointer" onClick={() => handleStrikeSelect(row.strike_price, row.pe.ltp, "PE")}>
+                              <td className={`py-1.5 px-1.5 text-left cursor-pointer ${row.strike_price > atmStrike ? "bg-red-500/5" : ""}`} onClick={() => handleStrikeSelect(row.strike_price, row.pe.ltp, "PE")}>
                                 <span className={`font-semibold ${isSel && selectedSide === "PE" ? "text-red-300" : "text-red-400"} hover:text-red-300`}>
                                   {isSel && selectedSide === "PE" && "\u2713 "}{row.pe.ltp.toFixed(2)}
                                 </span>
@@ -486,6 +538,17 @@ export default function TradePage() {
                   <button onClick={() => setOrderQty(orderQty + 1)} className="w-8 h-8 bg-gray-800 rounded-lg text-gray-400 hover:text-white flex items-center justify-center cursor-pointer transition-colors duration-200 active:scale-95 text-sm font-bold">+</button>
                 </div>
                 {isOption && <p className="text-xs text-gray-500 mt-1">= {totalShares} shares ({orderQty} lot{orderQty > 1 ? "s" : ""})</p>}
+                <div className="flex gap-1.5 mt-2">
+                  {[1, 2, 5, 10].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setOrderQty(n)}
+                      className={`text-[11px] px-2 py-1 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${orderQty === n ? "bg-violet-500/20 text-violet-300 border border-violet-500/40" : "bg-gray-800 text-gray-400 hover:text-white"}`}
+                    >
+                      {n}{isOption ? ` lot${n > 1 ? "s" : ""}` : ""}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {orderType === "LIMIT" && (
@@ -508,6 +571,43 @@ export default function TradePage() {
               : <textarea value={orderNotes} onChange={(e) => setOrderNotes(e.target.value)} placeholder="Trade notes..." rows={2}
                   className={`w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 resize-none cursor-text ${INTERACTION_CLASSES.formInput}`} />}
 
+              {/* Breakeven, max P&L, payoff */}
+              {isOption && selectedStrike && currentLtp > 0 && (() => {
+                const premium = effectivePrice;
+                const side: "CE" | "PE" = instrumentType === "PE" ? "PE" : "CE";
+                const be = side === "CE" ? selectedStrike + premium : selectedStrike - premium;
+                const longCapped = side === "CE" ? Infinity : (selectedStrike - premium) * totalShares;
+                const maxProfit = tradeType === "BUY" ? longCapped : premium * totalShares;
+                const maxLoss = tradeType === "BUY" ? premium * totalShares : longCapped;
+                const fmtMoney = (v: number) =>
+                  v === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+                return (
+                  <div className="bg-gray-800 rounded-lg p-3">
+                    <div className="grid grid-cols-3 gap-2 text-xs mb-2">
+                      <div><p className="text-gray-500">Breakeven</p><p className="text-white font-medium">{INR}{be.toFixed(2)}</p></div>
+                      <div><p className="text-gray-500">Max profit</p><p className="text-green-400 font-medium">{fmtMoney(maxProfit)}</p></div>
+                      <div><p className="text-gray-500">Max loss</p><p className="text-red-400 font-medium">{fmtMoney(maxLoss)}</p></div>
+                    </div>
+                    <div className="h-32 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={optionPayoff(side, tradeType, selectedStrike, premium, totalShares)} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                          <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
+                          <YAxis stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
+                          <Tooltip
+                            formatter={(v) => `${INR}${Number(v).toLocaleString("en-IN")}`}
+                            labelFormatter={(l) => `Underlying ${l}`}
+                            contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }}
+                          />
+                          <ReferenceLine y={0} stroke="#4b5563" />
+                          <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Summary */}
               <div className="bg-gray-800 rounded-lg p-3 space-y-1.5">
                 {[
@@ -529,12 +629,26 @@ export default function TradePage() {
                 {!canAfford && <p className="text-red-400 text-xs">Insufficient funds</p>}
               </div>
 
+              {/* Fast mode */}
+              <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={fastMode}
+                  onChange={(e) => {
+                    setFastMode(e.target.checked);
+                    localStorage.setItem("ts_fast_mode", e.target.checked ? "1" : "0");
+                  }}
+                  className="w-3.5 h-3.5 rounded cursor-pointer"
+                />
+                {"⚡"} Fast mode — place instantly without confirmation
+              </label>
+
               {/* Place / Confirm */}
               <div ref={placeOrderRef}>
                 {!confirmStep ? (
-                  <button onClick={() => setConfirmStep(true)} disabled={placing || !canAfford || currentLtp <= 0}
+                  <button onClick={() => (fastMode ? handlePlaceOrder() : setConfirmStep(true))} disabled={placing || !canAfford || currentLtp <= 0}
                     className={`w-full py-3 rounded-xl text-base font-semibold cursor-pointer transition-all duration-200 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed ${tradeType === "BUY" ? "bg-green-500 hover:bg-green-400 text-white" : "bg-red-500 hover:bg-red-400 text-white"}`}>
-                    Place {tradeType} Order
+                    {placing ? "Placing..." : `${fastMode ? "⚡ " : ""}Place ${tradeType} Order`}
                   </button>
                 ) : (
                   <div className="space-y-2">
