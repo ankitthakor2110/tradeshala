@@ -87,6 +87,7 @@ export default function TradePage() {
   const [indicesSource, setIndicesSource] = useState<string | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [tradeMode, setTradeMode] = useState<"single" | "strategy">("single");
   const [selectedSymbol, setSelectedSymbol] = useState("");
   const [selectedName, setSelectedName] = useState("");
   const [selectedExchange, setSelectedExchange] = useState("NSE");
@@ -214,7 +215,7 @@ export default function TradePage() {
     setSelectedSymbol(symbol); setSelectedName(name); setSelectedExchange(exchange);
     setInstrumentType("CE"); setTradeType("BUY"); setOrderType("MARKET"); setOrderQty(1);
     setOrderPrice(""); setOrderTrigger(""); setOrderNotes(""); setShowNotes(false);
-    setSlPrice(""); setTargetPrice(""); setRiskAmount("");
+    setSlPrice(""); setTargetPrice(""); setRiskAmount(""); setTradeMode("single");
     setConfirmStep(false); setOrderSuccess(null); setQuote(null);
     setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide("CE"); setFlashStrike(null);
     setModalOpen(true); fetchQuote(symbol, exchange);
@@ -392,7 +393,18 @@ export default function TradePage() {
                 )}
               </div>
 
+              {/* Mode: Single | Strategy */}
+              <div className="flex gap-1 bg-gray-800/50 p-1 rounded-lg">
+                {(["single", "strategy"] as const).map((m) => (
+                  <button key={m} onClick={() => setTradeMode(m)}
+                    className={`flex-1 text-xs font-semibold py-1.5 rounded-md cursor-pointer transition-all duration-200 active:scale-95 ${tradeMode === m ? "bg-violet-500 text-white" : "text-gray-400 hover:text-white hover:bg-gray-700"}`}>
+                    {m === "single" ? "Single Order" : "Strategy"}
+                  </button>
+                ))}
+              </div>
+
               {/* CE / PE tabs */}
+              {tradeMode === "single" && (
               <div className="flex gap-1 bg-gray-800/50 p-1 rounded-lg">
                 {(["CE", "PE"] as const).map((t) => (
                   <button key={t} onClick={() => { setInstrumentType(t); setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide(t); }}
@@ -401,6 +413,7 @@ export default function TradePage() {
                   </button>
                 ))}
               </div>
+              )}
 
               {/* Expiry dropdown */}
               {isOption && expiries.length > 0 && (
@@ -423,6 +436,12 @@ export default function TradePage() {
                 </div>
               )}
 
+              {tradeMode === "strategy" && (
+                <StrategyBuilder chain={chain} atmStrike={atmStrike} lotSize={lotSize} />
+              )}
+
+              {tradeMode === "single" && (
+              <>
               {/* Option chain — rich table */}
               {isOption && (chainLoading ? (
                 <div className="space-y-1.5 animate-pulse">{[...Array(6)].map((_, i) => <div key={i} className="h-9 bg-gray-800 rounded-lg" />)}</div>
@@ -768,10 +787,161 @@ export default function TradePage() {
                   </div>
                 )}
               </div>
+              </>
+              )}
             </>
           )}
         </div>
       </Modal>
+    </div>
+  );
+}
+
+// ---------------- Strategy Builder ----------------
+interface StrategyLeg { id: number; action: "BUY" | "SELL"; side: "CE" | "PE"; strike: number; lots: number }
+let legIdCounter = 0;
+
+function legPremium(leg: StrategyLeg, chain: OptionChainData[]): number {
+  const row = chain.find((r) => r.strike_price === leg.strike);
+  if (!row) return 0;
+  return leg.side === "CE" ? row.ce.ltp : row.pe.ltp;
+}
+
+function strategyMetrics(legs: StrategyLeg[], chain: OptionChainData[], lotSize: number) {
+  if (legs.length === 0) return null;
+  const strikes = legs.map((l) => l.strike);
+  const lo = Math.min(...strikes) * 0.8;
+  const hi = Math.max(...strikes) * 1.2;
+  const steps = 60;
+  const points: { s: number; pnl: number }[] = [];
+  for (let i = 0; i < steps; i++) {
+    const s = lo + ((hi - lo) * i) / (steps - 1);
+    let pnl = 0;
+    for (const leg of legs) {
+      const prem = legPremium(leg, chain);
+      const intrinsic = leg.side === "CE" ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
+      pnl += (leg.action === "BUY" ? intrinsic - prem : prem - intrinsic) * leg.lots * lotSize;
+    }
+    points.push({ s: Math.round(s), pnl: Math.round(pnl) });
+  }
+  let netPremium = 0;
+  for (const leg of legs) {
+    netPremium += (leg.action === "BUY" ? -legPremium(leg, chain) : legPremium(leg, chain)) * leg.lots * lotSize;
+  }
+  const n = points.length;
+  const rightSlope = points[n - 1].pnl - points[n - 2].pnl;
+  const leftSlope = points[0].pnl - points[1].pnl;
+  const maxProfit = rightSlope > 0.5 || leftSlope > 0.5 ? Infinity : Math.max(...points.map((p) => p.pnl));
+  const maxLoss = rightSlope < -0.5 || leftSlope < -0.5 ? -Infinity : Math.min(...points.map((p) => p.pnl));
+  const breakevens: number[] = [];
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if ((a.pnl <= 0 && b.pnl > 0) || (a.pnl >= 0 && b.pnl < 0)) {
+      const t = Math.abs(a.pnl) / (Math.abs(a.pnl) + Math.abs(b.pnl) || 1);
+      breakevens.push(Math.round(a.s + (b.s - a.s) * t));
+    }
+  }
+  return { points, netPremium, maxProfit, maxLoss, breakevens };
+}
+
+const STRATEGY_TEMPLATES = [
+  { key: "straddle", label: "Long Straddle" },
+  { key: "strangle", label: "Long Strangle" },
+  { key: "bullcall", label: "Bull Call" },
+  { key: "bearput", label: "Bear Put" },
+  { key: "ironcondor", label: "Iron Condor" },
+  { key: "butterfly", label: "Call Butterfly" },
+];
+
+function buildTemplate(key: string, atm: number, chain: OptionChainData[]): StrategyLeg[] {
+  const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
+  const idx = strikes.indexOf(atm);
+  if (idx < 0) return [];
+  const at = (off: number): number | undefined => strikes[idx + off];
+  const L = (action: "BUY" | "SELL", side: "CE" | "PE", strike: number | undefined, lots = 1): StrategyLeg | null =>
+    strike == null ? null : { id: (legIdCounter += 1), action, side, strike, lots };
+  let legs: (StrategyLeg | null)[] = [];
+  switch (key) {
+    case "straddle": legs = [L("BUY", "CE", at(0)), L("BUY", "PE", at(0))]; break;
+    case "strangle": legs = [L("BUY", "CE", at(1)), L("BUY", "PE", at(-1))]; break;
+    case "bullcall": legs = [L("BUY", "CE", at(0)), L("SELL", "CE", at(1))]; break;
+    case "bearput": legs = [L("BUY", "PE", at(0)), L("SELL", "PE", at(-1))]; break;
+    case "ironcondor": legs = [L("SELL", "PE", at(-1)), L("BUY", "PE", at(-2)), L("SELL", "CE", at(1)), L("BUY", "CE", at(2))]; break;
+    case "butterfly": legs = [L("BUY", "CE", at(-1)), L("SELL", "CE", at(0)), L("SELL", "CE", at(0)), L("BUY", "CE", at(1))]; break;
+  }
+  return legs.filter((l): l is StrategyLeg => l !== null);
+}
+
+function StrategyBuilder({ chain, atmStrike, lotSize }: { chain: OptionChainData[]; atmStrike: number; lotSize: number }) {
+  const [legs, setLegs] = useState<StrategyLeg[]>([]);
+  const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
+  const metrics = strategyMetrics(legs, chain, lotSize);
+  const fmtMoney = (v: number) =>
+    Math.abs(v) === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+
+  if (chain.length === 0) {
+    return <p className="text-sm text-gray-500 text-center py-6">Select an expiry to load strikes.</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-xs text-gray-400 mb-1.5">Templates</p>
+        <div className="flex flex-wrap gap-1.5">
+          {STRATEGY_TEMPLATES.map((t) => (
+            <button key={t.key} onClick={() => setLegs(buildTemplate(t.key, atmStrike, chain))}
+              className="text-[11px] px-2 py-1 rounded-md bg-gray-800 text-gray-300 hover:bg-violet-500/20 hover:text-violet-300 cursor-pointer active:scale-95 transition-all duration-200">
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        {legs.map((leg) => (
+          <div key={leg.id} className="flex items-center gap-1.5 text-xs">
+            <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, action: l.action === "BUY" ? "SELL" : "BUY" } : l)))}
+              className={`px-2 py-1 rounded-md font-semibold w-12 cursor-pointer ${leg.action === "BUY" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>{leg.action}</button>
+            <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, side: l.side === "CE" ? "PE" : "CE" } : l)))}
+              className={`px-2 py-1 rounded-md font-semibold w-10 cursor-pointer ${leg.side === "CE" ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>{leg.side}</button>
+            <select value={leg.strike} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, strike: Number(e.target.value) } : l)))}
+              className="bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white cursor-pointer">
+              {strikes.map((s) => <option key={s} value={s}>{s.toLocaleString("en-IN")}</option>)}
+            </select>
+            <input type="number" min={1} value={leg.lots} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, lots: Math.max(1, parseInt(e.target.value, 10) || 1) } : l)))}
+              className="w-14 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white" />
+            <span className="text-gray-500">@{INR}{legPremium(leg, chain).toFixed(1)}</span>
+            <button onClick={() => setLegs((ls) => ls.filter((l) => l.id !== leg.id))} className="text-red-400 hover:text-red-300 cursor-pointer ml-auto px-1" aria-label="Remove leg">✕</button>
+          </div>
+        ))}
+        <button onClick={() => setLegs((ls) => [...ls, { id: (legIdCounter += 1), action: "BUY", side: "CE", strike: atmStrike, lots: 1 }])}
+          className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer">+ Add leg</button>
+      </div>
+
+      {metrics && legs.length > 0 && (
+        <div className="bg-gray-800 rounded-lg p-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs mb-2">
+            <div><p className="text-gray-500">{metrics.netPremium >= 0 ? "Net credit" : "Net debit"}</p><p className="text-white font-medium">{INR}{Math.abs(metrics.netPremium).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</p></div>
+            <div><p className="text-gray-500">Max profit</p><p className="text-green-400 font-medium">{fmtMoney(metrics.maxProfit)}</p></div>
+            <div><p className="text-gray-500">Max loss</p><p className="text-red-400 font-medium">{fmtMoney(metrics.maxLoss)}</p></div>
+            <div><p className="text-gray-500">Breakeven</p><p className="text-white font-medium">{metrics.breakevens.length ? metrics.breakevens.join(", ") : "—"}</p></div>
+          </div>
+          <div className="h-40 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={metrics.points} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
+                <YAxis stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
+                <Tooltip formatter={(v) => `${INR}${Number(v).toLocaleString("en-IN")}`} labelFormatter={(l) => `Underlying ${l}`} contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }} />
+                <ReferenceLine y={0} stroke="#4b5563" />
+                <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="text-[10px] text-gray-600 mt-1">Combined payoff at expiry. Analysis only — placing all legs comes next.</p>
+        </div>
+      )}
     </div>
   );
 }
