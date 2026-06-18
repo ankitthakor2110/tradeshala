@@ -4,6 +4,10 @@
     {
       "path": "/api/market-data/snapshot",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/upstox-reauth",
+      "schedule": "30 3 * * *"
     }
   ]
 }

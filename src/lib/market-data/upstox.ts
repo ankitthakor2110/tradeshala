@@ -1,6 +1,8 @@
 import type { MarketData, StockGainerLoser } from "@/types/database";
 import { MOVERS_BASKET } from "./instruments";
 import { searchInstruments, resolveEquityKey } from "./upstox-instruments";
+import { createClient } from "@/lib/supabase/server";
+import { decryptSecret } from "@/lib/crypto/secrets";
 
 const UPSTOX_BASE = "https://api.upstox.com/v2";
 
@@ -29,9 +31,41 @@ function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, timestamp: Date.now() });
 }
 
-function getHeaders(): Record<string, string> | null {
-  const token = process.env.UPSTOX_ACCESS_TOKEN;
-  if (!token || token.startsWith("your_")) return null;
+/**
+ * Resolves the live Upstox access token. Prefers the DB-stored token from the
+ * connected broker (so a daily reconnect takes effect at runtime without an
+ * env change / redeploy), and falls back to the UPSTOX_ACCESS_TOKEN env var.
+ * Reading uses the request's Supabase session (RLS) — when there's no session
+ * (e.g. cron), it transparently falls back to the env token.
+ */
+async function getAccessToken(): Promise<string | null> {
+  try {
+    const supabase = await createClient();
+    const { data } = await supabase
+      .from("broker_connections")
+      .select("access_token, token_expiry")
+      .eq("broker_id", "upstox")
+      .eq("is_connected", true)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ access_token: string | null; token_expiry: string | null }>();
+
+    if (data?.access_token) {
+      const valid = !data.token_expiry || new Date(data.token_expiry).getTime() > Date.now();
+      const token = valid ? decryptSecret(data.access_token) : null;
+      if (token) return token;
+    }
+  } catch {
+    // No session / DB unavailable — fall back to env.
+  }
+
+  const envToken = process.env.UPSTOX_ACCESS_TOKEN;
+  return envToken && !envToken.startsWith("your_") ? envToken : null;
+}
+
+async function getHeaders(): Promise<Record<string, string> | null> {
+  const token = await getAccessToken();
+  if (!token) return null;
   return {
     Authorization: `Bearer ${token}`,
     Accept: "application/json",
@@ -39,8 +73,11 @@ function getHeaders(): Record<string, string> | null {
 }
 
 export function isUpstoxConfigured(): boolean {
+  // "Configured" if we have an app registered (API key) or a static token; the
+  // live token itself is resolved per-request from the DB or env.
+  const key = process.env.UPSTOX_API_KEY;
   const token = process.env.UPSTOX_ACCESS_TOKEN;
-  return !!(token && !token.startsWith("your_"));
+  return !!(key && !key.startsWith("your_")) || !!(token && !token.startsWith("your_"));
 }
 
 export interface UpstoxHealthResult {
@@ -60,7 +97,7 @@ export async function testConnection(): Promise<UpstoxHealthResult> {
     };
   }
 
-  const headers = getHeaders();
+  const headers = await getHeaders();
   if (!headers) {
     return {
       status: "error",
@@ -125,7 +162,7 @@ export async function fetchQuote(symbol: string): Promise<MarketData | null> {
   const cached = getCached<MarketData>(cacheKey);
   if (cached) return cached;
 
-  const headers = getHeaders();
+  const headers = await getHeaders();
   if (!headers) return null;
 
   // Resolve the instrument key: indices use name keys; equities are ISIN-based
@@ -183,7 +220,7 @@ export async function fetchIndices(): Promise<{
   const cached = getCached<{ nifty50: MarketData | null; bankNifty: MarketData | null; sensex: MarketData | null }>(cacheKey);
   if (cached) return cached;
 
-  const headers = getHeaders();
+  const headers = await getHeaders();
   if (!headers) return null;
 
   try {
@@ -246,7 +283,7 @@ export async function fetchGainersLosers(): Promise<{
   const cached = getCached<{ gainers: StockGainerLoser[]; losers: StockGainerLoser[] }>(cacheKey);
   if (cached) return cached;
 
-  const headers = getHeaders();
+  const headers = await getHeaders();
   if (!headers) return null;
 
   // Upstox has no top-movers endpoint, so we compute movers from a fixed basket
@@ -325,7 +362,7 @@ const LTP_MAX_KEYS = 500; // Upstox allows up to 500 instrument keys per request
 export async function fetchLtpBatch(
   entries: UniverseEntry[]
 ): Promise<BatchQuote[]> {
-  const headers = getHeaders();
+  const headers = await getHeaders();
   if (!headers || entries.length === 0) return [];
 
   const out: BatchQuote[] = [];

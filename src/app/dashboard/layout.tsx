@@ -4,6 +4,7 @@ import { useState } from "react";
 import Sidebar from "@/components/dashboard/Sidebar";
 import DashboardNavbar from "@/components/dashboard/DashboardNavbar";
 import ToastContainer from "@/components/ui/Toast";
+import UpstoxReconnectBanner from "@/components/dashboard/UpstoxReconnectBanner";
 
 export default function DashboardLayout({
   children,
@@ -35,6 +36,7 @@ export default function DashboardLayout({
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <DashboardNavbar onMenuClick={() => setSidebarOpen(!sidebarOpen)} />
         <main className="flex-1 overflow-y-auto overflow-x-hidden pt-16 px-3 sm:px-4 md:px-6 pb-4 md:pb-6">
+          <UpstoxReconnectBanner />
           {children}
         </main>
       </div>
