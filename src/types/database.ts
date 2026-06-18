@@ -231,6 +231,7 @@ export interface Position {
   target: number | null;
   alert_price: number | null;
   trail_amount: number | null;
+  targets: { price: number; qty: number }[] | null;
   opened_at: string;
   closed_at: string | null;
   updated_at: string;

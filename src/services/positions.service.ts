@@ -94,6 +94,23 @@ export async function setPositionRisk(
   }
 }
 
+/** Persists scale-out target levels on a position. */
+export async function setPositionTargets(
+  positionId: string,
+  targets: { price: number; qty: number }[]
+): Promise<boolean> {
+  try {
+    const supabase = createClient();
+    const { error } = await supabase
+      .from("positions")
+      .update({ targets } as never)
+      .eq("id", positionId);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 function isToday(iso: string | null): boolean {
   if (!iso) return false;
   const d = new Date(iso);
