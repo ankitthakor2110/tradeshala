@@ -279,6 +279,18 @@ export default function TradePage() {
     } else { showToast(result.message, "error"); setConfirmStep(false); }
   }
 
+  const reloadBalance = useCallback(async () => {
+    if (!userId) return;
+    const { createClient } = await import("@/lib/supabase/client");
+    const supabase = createClient();
+    const { data } = await supabase
+      .from("profiles")
+      .select("virtual_balance")
+      .eq("id", userId)
+      .single<{ virtual_balance: number }>();
+    if (data) setVirtualCash(data.virtual_balance);
+  }, [userId]);
+
   // Keep the latest place-action available to the Enter shortcut (no stale closures).
   useEffect(() => {
     placeActionRef.current = () => {
@@ -437,7 +449,16 @@ export default function TradePage() {
               )}
 
               {tradeMode === "strategy" && (
-                <StrategyBuilder chain={chain} atmStrike={atmStrike} lotSize={lotSize} />
+                <StrategyBuilder
+                  chain={chain}
+                  atmStrike={atmStrike}
+                  lotSize={lotSize}
+                  symbol={selectedSymbol}
+                  expiry={selectedExpiry}
+                  exchange={selectedExchange}
+                  userId={userId}
+                  onPlaced={() => { reloadBalance(); setModalOpen(false); }}
+                />
               )}
 
               {tradeMode === "single" && (
@@ -873,10 +894,59 @@ function buildTemplate(key: string, atm: number, chain: OptionChainData[]): Stra
   return legs.filter((l): l is StrategyLeg => l !== null);
 }
 
-function StrategyBuilder({ chain, atmStrike, lotSize }: { chain: OptionChainData[]; atmStrike: number; lotSize: number }) {
+function StrategyBuilder({
+  chain,
+  atmStrike,
+  lotSize,
+  symbol,
+  expiry,
+  exchange,
+  userId,
+  onPlaced,
+}: {
+  chain: OptionChainData[];
+  atmStrike: number;
+  lotSize: number;
+  symbol: string;
+  expiry: string | null;
+  exchange: string;
+  userId: string;
+  onPlaced: () => void;
+}) {
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
+  const [placingStrategy, setPlacingStrategy] = useState(false);
   const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
   const metrics = strategyMetrics(legs, chain, lotSize);
+  const hasShort = legs.some((l) => l.action === "SELL");
+
+  async function placeStrategy() {
+    if (!userId || legs.length === 0 || hasShort || !expiry) return;
+    setPlacingStrategy(true);
+    let ok = 0;
+    let fail = 0;
+    for (const leg of legs) {
+      const res = await placeOrder(userId, {
+        symbol,
+        exchange,
+        instrument_type: leg.side,
+        option_type: leg.side,
+        strike_price: leg.strike,
+        expiry_date: expiry,
+        lot_size: lotSize,
+        order_type: "MARKET",
+        trade_type: leg.action,
+        quantity: leg.lots * lotSize,
+        price: null,
+        trigger_price: null,
+        notes: "Strategy",
+      });
+      if (res.success) ok += 1;
+      else fail += 1;
+    }
+    setPlacingStrategy(false);
+    showToast(`Strategy: ${ok} leg(s) placed${fail ? `, ${fail} failed` : ""}`, fail ? "error" : "success");
+    onPlaced();
+  }
   const fmtMoney = (v: number) =>
     Math.abs(v) === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 
@@ -939,7 +1009,19 @@ function StrategyBuilder({ chain, atmStrike, lotSize }: { chain: OptionChainData
               </ComposedChart>
             </ResponsiveContainer>
           </div>
-          <p className="text-[10px] text-gray-600 mt-1">Combined payoff at expiry. Analysis only — placing all legs comes next.</p>
+          <p className="text-[10px] text-gray-600 mt-1">Combined payoff at expiry.</p>
+          <button
+            onClick={placeStrategy}
+            disabled={placingStrategy || hasShort || !userId}
+            className={`${INTERACTION_CLASSES.primaryButton} w-full mt-2 py-2.5 rounded-lg text-sm font-semibold text-white`}
+          >
+            {placingStrategy ? "Placing…" : `Place strategy (${legs.length} leg${legs.length > 1 ? "s" : ""})`}
+          </button>
+          {hasShort && (
+            <p className="text-[10px] text-amber-400 mt-1">
+              Short/writing legs can&apos;t be placed yet (engine is long-only). All-long strategies like straddle/strangle can be placed.
+            </p>
+          )}
         </div>
       )}
     </div>
