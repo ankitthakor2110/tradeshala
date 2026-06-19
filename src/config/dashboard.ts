@@ -58,6 +58,14 @@ export const dashboardConfig = {
 
   welcomeSubtext: "Here's your market overview for today.",
 
+  // Live market data. On Vercel Hobby, cron runs at most once/day, so the
+  // browser drives intra-day refreshes: while a live-data page is open and the
+  // market is open, it asks the server for a fresh snapshot every N ms. Updates
+  // fan out to every client via Supabase Realtime (see useLiveQuotes).
+  marketData: {
+    snapshotPollIntervalMs: 15000,
+  },
+
   mockIndices: [
     {
       name: "NIFTY 50",

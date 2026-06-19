@@ -30,6 +30,23 @@ interface SearchResult {
   instrument_type: string;
 }
 
+/**
+ * Asks the server to take a fresh market snapshot (writes `live_quotes`).
+ * Called on an interval by `useSnapshotPoller` to keep live prices flowing on
+ * the Vercel Hobby plan, where cron is limited to once per day. Returns whether
+ * the request succeeded (a throttled "skipped" pass still counts as success).
+ */
+export async function triggerSnapshotRefresh(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/market-data/snapshot/refresh", {
+      method: "POST",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function getIndicesData(): Promise<IndicesResponse | null> {
   try {
     const res = await fetch("/api/market-data/indices");
