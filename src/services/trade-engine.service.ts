@@ -207,7 +207,8 @@ export interface OrderResult {
 
 export async function placeOrder(
   userId: string,
-  orderData: OrderFormData
+  orderData: OrderFormData,
+  risk?: { stop_loss?: number | null; target?: number | null }
 ): Promise<OrderResult> {
   try {
     // Step 1: Validate
@@ -300,7 +301,7 @@ export async function placeOrder(
 
     // Step 5 & 6: Update position and cash only if executed
     if (isExecuted && fill) {
-      await updatePosition(userId, insertedOrder, fill);
+      await updatePosition(userId, insertedOrder, fill, risk);
 
       // Slippage is already in executed_price; total_charges covers brokerage +
       // statutory charges. Buys pay proceeds + charges; sells receive proceeds
@@ -343,7 +344,8 @@ export async function placeOrder(
 async function updatePosition(
   userId: string,
   order: Order,
-  fill: SimulatedFill
+  fill: SimulatedFill,
+  risk?: { stop_loss?: number | null; target?: number | null }
 ): Promise<void> {
   const supabase = createClient();
 
@@ -396,6 +398,8 @@ async function updatePosition(
         pnl_percent: 0,
         day_pnl: 0,
         status: "OPEN",
+        stop_loss: risk?.stop_loss ?? null,
+        target: risk?.target ?? null,
         opened_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       } as never);

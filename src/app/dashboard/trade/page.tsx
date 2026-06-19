@@ -8,7 +8,17 @@ import { searchStocks, getStockQuote, getIndicesData } from "@/services/market-d
 import { TRADE_CONFIG } from "@/config/trade";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { getPnLColor } from "@/utils/colors";
-import { formatOI } from "@/utils/format";
+import { formatOI, formatPercent } from "@/utils/format";
+import {
+  ComposedChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
 import LiveBadge from "@/components/ui/LiveBadge";
 import Modal from "@/components/ui/Modal";
 import { showToast } from "@/components/ui/Toast";
@@ -22,6 +32,28 @@ const STRIKE_GAP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, FINNIFTY
 function calcAtm(price: number, symbol: string): number {
   const gap = STRIKE_GAP[symbol] ?? 5;
   return Math.round(price / gap) * gap;
+}
+
+// P&L at expiry for a single option leg across a range of underlying prices.
+function optionPayoff(
+  side: "CE" | "PE",
+  tradeType: "BUY" | "SELL",
+  strike: number,
+  premium: number,
+  totalQty: number
+): { s: number; pnl: number }[] {
+  if (!strike || totalQty <= 0) return [];
+  const lo = strike * 0.9;
+  const hi = strike * 1.1;
+  const steps = 25;
+  const pts: { s: number; pnl: number }[] = [];
+  for (let i = 0; i < steps; i++) {
+    const s = lo + ((hi - lo) * i) / (steps - 1);
+    const intrinsic = side === "CE" ? Math.max(0, s - strike) : Math.max(0, strike - s);
+    const longPnl = (intrinsic - premium) * totalQty;
+    pts.push({ s: Math.round(s), pnl: Math.round(tradeType === "BUY" ? longPnl : -longPnl) });
+  }
+  return pts;
 }
 
 function filterStrikes(chain: OptionChainData[], atm: number, symbol: string): OptionChainData[] {
@@ -39,6 +71,7 @@ type OrderType = "MARKET" | "LIMIT" | "SL" | "SL-M";
 export default function TradePage() {
   const mounted = useIsMounted();
   const placeOrderRef = useRef<HTMLDivElement>(null);
+  const placeActionRef = useRef<() => void>(() => {});
 
   const [userId, setUserId] = useState("");
   const [virtualCash, setVirtualCash] = useState(1000000);
@@ -54,6 +87,7 @@ export default function TradePage() {
   const [indicesSource, setIndicesSource] = useState<string | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [tradeMode, setTradeMode] = useState<"single" | "strategy">("single");
   const [selectedSymbol, setSelectedSymbol] = useState("");
   const [selectedName, setSelectedName] = useState("");
   const [selectedExchange, setSelectedExchange] = useState("NSE");
@@ -77,11 +111,20 @@ export default function TradePage() {
   const [orderQty, setOrderQty] = useState(1);
   const [orderPrice, setOrderPrice] = useState("");
   const [orderTrigger, setOrderTrigger] = useState("");
+  const [slPrice, setSlPrice] = useState("");
+  const [targetPrice, setTargetPrice] = useState("");
+  const [riskAmount, setRiskAmount] = useState("");
   const [orderNotes, setOrderNotes] = useState("");
   const [showNotes, setShowNotes] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [confirmStep, setConfirmStep] = useState(false);
+  const [fastMode, setFastMode] = useState(false);
   const [orderSuccess, setOrderSuccess] = useState<{ msg: string; detail: string } | null>(null);
+
+  // Load the persisted fast-mode preference (client-only).
+  useEffect(() => {
+    setFastMode(localStorage.getItem("ts_fast_mode") === "1");
+  }, []);
 
   useEffect(() => {
     getCurrentUser().then(async (user) => {
@@ -148,16 +191,31 @@ export default function TradePage() {
         const underlying = d.underlyingPrice ?? quote?.last_price ?? 0;
         const atm = calcAtm(underlying, selectedSymbol);
         setAtmStrike(atm);
-        setChain(filterStrikes(fullChain, atm, selectedSymbol));
+        const filtered = filterStrikes(fullChain, atm, selectedSymbol);
+        setChain(filtered);
+        // Smart default: preselect the ATM strike when nothing is chosen yet.
+        if (selectedStrike === null) {
+          const atmRow = filtered.find((r) => r.strike_price === atm);
+          if (atmRow) {
+            const side = instrumentType === "PE" ? "PE" : "CE";
+            setSelectedStrike(atm);
+            setSelectedSide(side);
+            setSelectedOptionLtp(side === "PE" ? atmRow.pe.ltp : atmRow.ce.ltp);
+          }
+        }
         setChainLoading(false);
       })
       .catch(() => { setChain([]); setChainLoading(false); });
+    // selectedStrike is read only to auto-select once; re-running on it would
+    // refetch the chain on every strike click.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol, selectedExpiry, instrumentType, quote?.last_price]);
 
   function openTradeModal(symbol: string, name: string, exchange: string) {
     setSelectedSymbol(symbol); setSelectedName(name); setSelectedExchange(exchange);
     setInstrumentType("CE"); setTradeType("BUY"); setOrderType("MARKET"); setOrderQty(1);
     setOrderPrice(""); setOrderTrigger(""); setOrderNotes(""); setShowNotes(false);
+    setSlPrice(""); setTargetPrice(""); setRiskAmount(""); setTradeMode("single");
     setConfirmStep(false); setOrderSuccess(null); setQuote(null);
     setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide("CE"); setFlashStrike(null);
     setModalOpen(true); fetchQuote(symbol, exchange);
@@ -165,6 +223,7 @@ export default function TradePage() {
 
   function handleStrikeSelect(strike: number, ltp: number, side: "CE" | "PE") {
     setSelectedStrike(strike); setSelectedOptionLtp(ltp); setInstrumentType(side); setSelectedSide(side);
+    setSlPrice(""); setTargetPrice("");
     setFlashStrike(strike);
     setTimeout(() => setFlashStrike(null), 300);
     setTimeout(() => placeOrderRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 200);
@@ -175,6 +234,27 @@ export default function TradePage() {
   const currentLtp = isOption && selectedOptionLtp ? selectedOptionLtp : (quote?.last_price ?? 0);
   const effectivePrice = orderType === "LIMIT" && orderPrice ? parseFloat(orderPrice) : currentLtp;
   const totalShares = isOption ? orderQty * lotSize : orderQty;
+
+  const selectedDelta = useMemo(() => {
+    if (!selectedStrike) return null;
+    const row = chain.find((r) => r.strike_price === selectedStrike);
+    if (!row) return null;
+    return selectedSide === "PE" ? row.pe.delta : row.ce.delta;
+  }, [chain, selectedStrike, selectedSide]);
+
+  const numOrNull = (s: string) => {
+    const n = parseFloat(s);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const applyRiskSizing = () => {
+    const amt = parseFloat(riskAmount);
+    const sl = parseFloat(slPrice);
+    if (!Number.isFinite(amt) || amt <= 0 || !Number.isFinite(sl)) return;
+    const riskPerLot = (effectivePrice - sl) * lotSize;
+    if (riskPerLot <= 0) return;
+    setOrderQty(Math.max(1, Math.floor(amt / riskPerLot)));
+  };
   const grossValue = effectivePrice * totalShares;
   const estFill = currentLtp > 0
     ? simulateFill({ symbol: selectedSymbol, exchange: selectedExchange, instrument_type: instrumentType, option_type: isOption ? instrumentType : null, strike_price: selectedStrike, expiry_date: selectedExpiry, lot_size: lotSize, order_type: orderType, trade_type: tradeType, quantity: totalShares, price: orderType === "LIMIT" ? parseFloat(orderPrice) || null : null, trigger_price: (orderType === "SL" || orderType === "SL-M") ? parseFloat(orderTrigger) || null : null, notes: null }, currentLtp)
@@ -187,13 +267,55 @@ export default function TradePage() {
   async function handlePlaceOrder() {
     setPlacing(true);
     const od: OrderFormData = { symbol: selectedSymbol, exchange: selectedExchange, instrument_type: instrumentType, option_type: isOption ? instrumentType : null, strike_price: selectedStrike, expiry_date: selectedExpiry, lot_size: lotSize, order_type: orderType, trade_type: tradeType, quantity: totalShares, price: orderType === "LIMIT" ? parseFloat(orderPrice) || null : null, trigger_price: (orderType === "SL" || orderType === "SL-M") ? parseFloat(orderTrigger) || null : null, notes: orderNotes || null };
-    const result = await placeOrder(userId, od);
+    const result = await placeOrder(
+      userId,
+      od,
+      tradeType === "BUY" ? { stop_loss: numOrNull(slPrice), target: numOrNull(targetPrice) } : undefined
+    );
     setPlacing(false);
     if (result.success) {
       setVirtualCash((p) => tradeType === "BUY" ? p - totalValue : p + grossValue - charges);
       setOrderSuccess({ msg: `${tradeType === "BUY" ? "Bought" : "Sold"} ${isOption ? `${orderQty} lot` : `${totalShares} shares`} of ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} at ${INR}${(result.fill?.executed_price ?? effectivePrice).toFixed(2)}`, detail: tradeType === "BUY" ? `${INR}${totalValue.toLocaleString("en-IN", { maximumFractionDigits: 0 })} deducted` : `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited` });
     } else { showToast(result.message, "error"); setConfirmStep(false); }
   }
+
+  const reloadBalance = useCallback(async () => {
+    if (!userId) return;
+    const { createClient } = await import("@/lib/supabase/client");
+    const supabase = createClient();
+    const { data } = await supabase
+      .from("profiles")
+      .select("virtual_balance")
+      .eq("id", userId)
+      .single<{ virtual_balance: number }>();
+    if (data) setVirtualCash(data.virtual_balance);
+  }, [userId]);
+
+  // Keep the latest place-action available to the Enter shortcut (no stale closures).
+  useEffect(() => {
+    placeActionRef.current = () => {
+      if (placing || !canAfford || currentLtp <= 0) return;
+      if (confirmStep || fastMode) handlePlaceOrder();
+      else setConfirmStep(true);
+    };
+  });
+
+  // Keyboard shortcuts while the trade modal is open (ignored when typing).
+  useEffect(() => {
+    if (!modalOpen) return;
+    function onKey(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const k = e.key.toLowerCase();
+      if (k === "b") { setTradeType("BUY"); e.preventDefault(); }
+      else if (k === "s") { setTradeType("SELL"); e.preventDefault(); }
+      else if (k === "+" || k === "=" || k === "arrowup") { setOrderQty((q) => q + 1); e.preventDefault(); }
+      else if (k === "-" || k === "arrowdown") { setOrderQty((q) => Math.max(1, q - 1)); e.preventDefault(); }
+      else if (k === "enter") { placeActionRef.current(); e.preventDefault(); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [modalOpen]);
 
   if (!mounted) return null;
   const ls = indicesSource === "dhan" || indicesSource === "upstox" ? indicesSource : "demo";
@@ -283,7 +405,18 @@ export default function TradePage() {
                 )}
               </div>
 
+              {/* Mode: Single | Strategy */}
+              <div className="flex gap-1 bg-gray-800/50 p-1 rounded-lg">
+                {(["single", "strategy"] as const).map((m) => (
+                  <button key={m} onClick={() => setTradeMode(m)}
+                    className={`flex-1 text-xs font-semibold py-1.5 rounded-md cursor-pointer transition-all duration-200 active:scale-95 ${tradeMode === m ? "bg-violet-500 text-white" : "text-gray-400 hover:text-white hover:bg-gray-700"}`}>
+                    {m === "single" ? "Single Order" : "Strategy"}
+                  </button>
+                ))}
+              </div>
+
               {/* CE / PE tabs */}
+              {tradeMode === "single" && (
               <div className="flex gap-1 bg-gray-800/50 p-1 rounded-lg">
                 {(["CE", "PE"] as const).map((t) => (
                   <button key={t} onClick={() => { setInstrumentType(t); setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide(t); }}
@@ -292,6 +425,7 @@ export default function TradePage() {
                   </button>
                 ))}
               </div>
+              )}
 
               {/* Expiry dropdown */}
               {isOption && expiries.length > 0 && (
@@ -314,6 +448,21 @@ export default function TradePage() {
                 </div>
               )}
 
+              {tradeMode === "strategy" && (
+                <StrategyBuilder
+                  chain={chain}
+                  atmStrike={atmStrike}
+                  lotSize={lotSize}
+                  symbol={selectedSymbol}
+                  expiry={selectedExpiry}
+                  exchange={selectedExchange}
+                  userId={userId}
+                  onPlaced={() => { reloadBalance(); setModalOpen(false); }}
+                />
+              )}
+
+              {tradeMode === "single" && (
+              <>
               {/* Option chain — rich table */}
               {isOption && (chainLoading ? (
                 <div className="space-y-1.5 animate-pulse">{[...Array(6)].map((_, i) => <div key={i} className="h-9 bg-gray-800 rounded-lg" />)}</div>
@@ -393,7 +542,7 @@ export default function TradePage() {
                                   <span className="text-green-400">{row.ce.bid.toFixed(1)}</span>/<span className="text-red-400">{row.ce.ask.toFixed(1)}</span>
                                 </td>
                               )}
-                              <td className="py-1.5 px-1.5 text-right cursor-pointer" onClick={() => handleStrikeSelect(row.strike_price, row.ce.ltp, "CE")}>
+                              <td className={`py-1.5 px-1.5 text-right cursor-pointer ${row.strike_price < atmStrike ? "bg-green-500/5" : ""}`} onClick={() => handleStrikeSelect(row.strike_price, row.ce.ltp, "CE")}>
                                 <span className={`font-semibold ${isSel && selectedSide === "CE" ? "text-green-300" : "text-green-400"} hover:text-green-300`}>
                                   {row.ce.ltp.toFixed(2)}{isSel && selectedSide === "CE" && " \u2713"}
                                 </span>
@@ -404,7 +553,7 @@ export default function TradePage() {
                                 {isMaxPain && <div className="text-[9px] text-yellow-400 font-normal">{"\u26A1"}MAX PAIN</div>}
                                 {row.pcr > 0 && <div className={`text-[9px] px-1 rounded mt-0.5 inline-block ${pcrBg}`}>{row.pcr > 1.2 ? "\uD83D\uDC02" : row.pcr < 0.8 ? "\uD83D\uDC3B" : "\u2696\uFE0F"}{row.pcr.toFixed(2)}</div>}
                               </td>
-                              <td className="py-1.5 px-1.5 text-left cursor-pointer" onClick={() => handleStrikeSelect(row.strike_price, row.pe.ltp, "PE")}>
+                              <td className={`py-1.5 px-1.5 text-left cursor-pointer ${row.strike_price > atmStrike ? "bg-red-500/5" : ""}`} onClick={() => handleStrikeSelect(row.strike_price, row.pe.ltp, "PE")}>
                                 <span className={`font-semibold ${isSel && selectedSide === "PE" ? "text-red-300" : "text-red-400"} hover:text-red-300`}>
                                   {isSel && selectedSide === "PE" && "\u2713 "}{row.pe.ltp.toFixed(2)}
                                 </span>
@@ -486,6 +635,17 @@ export default function TradePage() {
                   <button onClick={() => setOrderQty(orderQty + 1)} className="w-8 h-8 bg-gray-800 rounded-lg text-gray-400 hover:text-white flex items-center justify-center cursor-pointer transition-colors duration-200 active:scale-95 text-sm font-bold">+</button>
                 </div>
                 {isOption && <p className="text-xs text-gray-500 mt-1">= {totalShares} shares ({orderQty} lot{orderQty > 1 ? "s" : ""})</p>}
+                <div className="flex gap-1.5 mt-2">
+                  {[1, 2, 5, 10].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setOrderQty(n)}
+                      className={`text-[11px] px-2 py-1 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${orderQty === n ? "bg-violet-500/20 text-violet-300 border border-violet-500/40" : "bg-gray-800 text-gray-400 hover:text-white"}`}
+                    >
+                      {n}{isOption ? ` lot${n > 1 ? "s" : ""}` : ""}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {orderType === "LIMIT" && (
@@ -508,6 +668,90 @@ export default function TradePage() {
               : <textarea value={orderNotes} onChange={(e) => setOrderNotes(e.target.value)} placeholder="Trade notes..." rows={2}
                   className={`w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 resize-none cursor-text ${INTERACTION_CLASSES.formInput}`} />}
 
+              {/* Bracket (SL / Target) + R:R + risk sizing — BUY only */}
+              {isOption && selectedStrike && tradeType === "BUY" && currentLtp > 0 && (() => {
+                const entry = effectivePrice;
+                const sl = parseFloat(slPrice);
+                const tgt = parseFloat(targetPrice);
+                const hasSL = Number.isFinite(sl) && sl > 0;
+                const hasTgt = Number.isFinite(tgt) && tgt > 0;
+                const risk = hasSL ? entry - sl : null;
+                const reward = hasTgt ? tgt - entry : null;
+                const rr = risk && risk > 0 && reward != null ? reward / risk : null;
+                return (
+                  <div className="bg-gray-800 rounded-lg p-3 space-y-2">
+                    <p className="text-xs font-semibold text-gray-300">Bracket — auto SL &amp; target</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Stop-loss</label>
+                        <input type="number" step="0.05" value={slPrice} onChange={(e) => setSlPrice(e.target.value)} placeholder={`< ${entry.toFixed(2)}`}
+                          className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Target</label>
+                        <input type="number" step="0.05" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} placeholder={`> ${entry.toFixed(2)}`}
+                          className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+                      {rr != null && <span className="text-gray-400">R:R <span className="text-white font-medium">1 : {rr.toFixed(2)}</span></span>}
+                      {risk != null && risk > 0 && <span className="text-gray-400">Risk <span className="text-red-400 font-medium">{INR}{(risk * totalShares).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span></span>}
+                      {reward != null && reward > 0 && <span className="text-gray-400">Reward <span className="text-green-400 font-medium">{INR}{(reward * totalShares).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span></span>}
+                      {selectedDelta != null && <span className="text-gray-400">Prob. ITM <span className="text-white font-medium">{formatPercent(Math.abs(selectedDelta) * 100)}</span></span>}
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1">
+                        <label className="block text-[10px] text-gray-500 mb-0.5">Risk budget ({INR})</label>
+                        <input type="number" value={riskAmount} onChange={(e) => setRiskAmount(e.target.value)} placeholder="e.g. 2000"
+                          className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                      </div>
+                      <button onClick={applyRiskSizing} disabled={!hasSL}
+                        className="text-xs px-3 py-1.5 rounded-md border border-violet-500/40 text-violet-300 hover:bg-violet-500/10 cursor-pointer active:scale-95 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed">
+                        Size by risk
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-600">SL/Target attach to the position and auto-close (whichever hits first) from the Positions page.</p>
+                  </div>
+                );
+              })()}
+
+              {/* Breakeven, max P&L, payoff */}
+              {isOption && selectedStrike && currentLtp > 0 && (() => {
+                const premium = effectivePrice;
+                const side: "CE" | "PE" = instrumentType === "PE" ? "PE" : "CE";
+                const be = side === "CE" ? selectedStrike + premium : selectedStrike - premium;
+                const longCapped = side === "CE" ? Infinity : (selectedStrike - premium) * totalShares;
+                const maxProfit = tradeType === "BUY" ? longCapped : premium * totalShares;
+                const maxLoss = tradeType === "BUY" ? premium * totalShares : longCapped;
+                const fmtMoney = (v: number) =>
+                  v === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+                return (
+                  <div className="bg-gray-800 rounded-lg p-3">
+                    <div className="grid grid-cols-3 gap-2 text-xs mb-2">
+                      <div><p className="text-gray-500">Breakeven</p><p className="text-white font-medium">{INR}{be.toFixed(2)}</p></div>
+                      <div><p className="text-gray-500">Max profit</p><p className="text-green-400 font-medium">{fmtMoney(maxProfit)}</p></div>
+                      <div><p className="text-gray-500">Max loss</p><p className="text-red-400 font-medium">{fmtMoney(maxLoss)}</p></div>
+                    </div>
+                    <div className="h-32 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={optionPayoff(side, tradeType, selectedStrike, premium, totalShares)} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                          <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
+                          <YAxis stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
+                          <Tooltip
+                            formatter={(v) => `${INR}${Number(v).toLocaleString("en-IN")}`}
+                            labelFormatter={(l) => `Underlying ${l}`}
+                            contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }}
+                          />
+                          <ReferenceLine y={0} stroke="#4b5563" />
+                          <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Summary */}
               <div className="bg-gray-800 rounded-lg p-3 space-y-1.5">
                 {[
@@ -529,12 +773,27 @@ export default function TradePage() {
                 {!canAfford && <p className="text-red-400 text-xs">Insufficient funds</p>}
               </div>
 
+              {/* Fast mode */}
+              <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={fastMode}
+                  onChange={(e) => {
+                    setFastMode(e.target.checked);
+                    localStorage.setItem("ts_fast_mode", e.target.checked ? "1" : "0");
+                  }}
+                  className="w-3.5 h-3.5 rounded cursor-pointer"
+                />
+                {"⚡"} Fast mode — place instantly without confirmation
+              </label>
+              <p className="text-[10px] text-gray-600 -mt-1">Shortcuts: <span className="text-gray-400">B</span>/<span className="text-gray-400">S</span> side · <span className="text-gray-400">↑↓</span> qty · <span className="text-gray-400">Enter</span> place</p>
+
               {/* Place / Confirm */}
               <div ref={placeOrderRef}>
                 {!confirmStep ? (
-                  <button onClick={() => setConfirmStep(true)} disabled={placing || !canAfford || currentLtp <= 0}
+                  <button onClick={() => (fastMode ? handlePlaceOrder() : setConfirmStep(true))} disabled={placing || !canAfford || currentLtp <= 0}
                     className={`w-full py-3 rounded-xl text-base font-semibold cursor-pointer transition-all duration-200 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed ${tradeType === "BUY" ? "bg-green-500 hover:bg-green-400 text-white" : "bg-red-500 hover:bg-red-400 text-white"}`}>
-                    Place {tradeType} Order
+                    {placing ? "Placing..." : `${fastMode ? "⚡ " : ""}Place ${tradeType} Order`}
                   </button>
                 ) : (
                   <div className="space-y-2">
@@ -549,10 +808,222 @@ export default function TradePage() {
                   </div>
                 )}
               </div>
+              </>
+              )}
             </>
           )}
         </div>
       </Modal>
+    </div>
+  );
+}
+
+// ---------------- Strategy Builder ----------------
+interface StrategyLeg { id: number; action: "BUY" | "SELL"; side: "CE" | "PE"; strike: number; lots: number }
+let legIdCounter = 0;
+
+function legPremium(leg: StrategyLeg, chain: OptionChainData[]): number {
+  const row = chain.find((r) => r.strike_price === leg.strike);
+  if (!row) return 0;
+  return leg.side === "CE" ? row.ce.ltp : row.pe.ltp;
+}
+
+function strategyMetrics(legs: StrategyLeg[], chain: OptionChainData[], lotSize: number) {
+  if (legs.length === 0) return null;
+  const strikes = legs.map((l) => l.strike);
+  const lo = Math.min(...strikes) * 0.8;
+  const hi = Math.max(...strikes) * 1.2;
+  const steps = 60;
+  const points: { s: number; pnl: number }[] = [];
+  for (let i = 0; i < steps; i++) {
+    const s = lo + ((hi - lo) * i) / (steps - 1);
+    let pnl = 0;
+    for (const leg of legs) {
+      const prem = legPremium(leg, chain);
+      const intrinsic = leg.side === "CE" ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
+      pnl += (leg.action === "BUY" ? intrinsic - prem : prem - intrinsic) * leg.lots * lotSize;
+    }
+    points.push({ s: Math.round(s), pnl: Math.round(pnl) });
+  }
+  let netPremium = 0;
+  for (const leg of legs) {
+    netPremium += (leg.action === "BUY" ? -legPremium(leg, chain) : legPremium(leg, chain)) * leg.lots * lotSize;
+  }
+  const n = points.length;
+  const rightSlope = points[n - 1].pnl - points[n - 2].pnl;
+  const leftSlope = points[0].pnl - points[1].pnl;
+  const maxProfit = rightSlope > 0.5 || leftSlope > 0.5 ? Infinity : Math.max(...points.map((p) => p.pnl));
+  const maxLoss = rightSlope < -0.5 || leftSlope < -0.5 ? -Infinity : Math.min(...points.map((p) => p.pnl));
+  const breakevens: number[] = [];
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if ((a.pnl <= 0 && b.pnl > 0) || (a.pnl >= 0 && b.pnl < 0)) {
+      const t = Math.abs(a.pnl) / (Math.abs(a.pnl) + Math.abs(b.pnl) || 1);
+      breakevens.push(Math.round(a.s + (b.s - a.s) * t));
+    }
+  }
+  return { points, netPremium, maxProfit, maxLoss, breakevens };
+}
+
+const STRATEGY_TEMPLATES = [
+  { key: "straddle", label: "Long Straddle" },
+  { key: "strangle", label: "Long Strangle" },
+  { key: "bullcall", label: "Bull Call" },
+  { key: "bearput", label: "Bear Put" },
+  { key: "ironcondor", label: "Iron Condor" },
+  { key: "butterfly", label: "Call Butterfly" },
+];
+
+function buildTemplate(key: string, atm: number, chain: OptionChainData[]): StrategyLeg[] {
+  const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
+  const idx = strikes.indexOf(atm);
+  if (idx < 0) return [];
+  const at = (off: number): number | undefined => strikes[idx + off];
+  const L = (action: "BUY" | "SELL", side: "CE" | "PE", strike: number | undefined, lots = 1): StrategyLeg | null =>
+    strike == null ? null : { id: (legIdCounter += 1), action, side, strike, lots };
+  let legs: (StrategyLeg | null)[] = [];
+  switch (key) {
+    case "straddle": legs = [L("BUY", "CE", at(0)), L("BUY", "PE", at(0))]; break;
+    case "strangle": legs = [L("BUY", "CE", at(1)), L("BUY", "PE", at(-1))]; break;
+    case "bullcall": legs = [L("BUY", "CE", at(0)), L("SELL", "CE", at(1))]; break;
+    case "bearput": legs = [L("BUY", "PE", at(0)), L("SELL", "PE", at(-1))]; break;
+    case "ironcondor": legs = [L("SELL", "PE", at(-1)), L("BUY", "PE", at(-2)), L("SELL", "CE", at(1)), L("BUY", "CE", at(2))]; break;
+    case "butterfly": legs = [L("BUY", "CE", at(-1)), L("SELL", "CE", at(0)), L("SELL", "CE", at(0)), L("BUY", "CE", at(1))]; break;
+  }
+  return legs.filter((l): l is StrategyLeg => l !== null);
+}
+
+function StrategyBuilder({
+  chain,
+  atmStrike,
+  lotSize,
+  symbol,
+  expiry,
+  exchange,
+  userId,
+  onPlaced,
+}: {
+  chain: OptionChainData[];
+  atmStrike: number;
+  lotSize: number;
+  symbol: string;
+  expiry: string | null;
+  exchange: string;
+  userId: string;
+  onPlaced: () => void;
+}) {
+  const [legs, setLegs] = useState<StrategyLeg[]>([]);
+  const [placingStrategy, setPlacingStrategy] = useState(false);
+  const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
+  const metrics = strategyMetrics(legs, chain, lotSize);
+  const hasShort = legs.some((l) => l.action === "SELL");
+
+  async function placeStrategy() {
+    if (!userId || legs.length === 0 || hasShort || !expiry) return;
+    setPlacingStrategy(true);
+    let ok = 0;
+    let fail = 0;
+    for (const leg of legs) {
+      const res = await placeOrder(userId, {
+        symbol,
+        exchange,
+        instrument_type: leg.side,
+        option_type: leg.side,
+        strike_price: leg.strike,
+        expiry_date: expiry,
+        lot_size: lotSize,
+        order_type: "MARKET",
+        trade_type: leg.action,
+        quantity: leg.lots * lotSize,
+        price: null,
+        trigger_price: null,
+        notes: "Strategy",
+      });
+      if (res.success) ok += 1;
+      else fail += 1;
+    }
+    setPlacingStrategy(false);
+    showToast(`Strategy: ${ok} leg(s) placed${fail ? `, ${fail} failed` : ""}`, fail ? "error" : "success");
+    onPlaced();
+  }
+  const fmtMoney = (v: number) =>
+    Math.abs(v) === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+
+  if (chain.length === 0) {
+    return <p className="text-sm text-gray-500 text-center py-6">Select an expiry to load strikes.</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-xs text-gray-400 mb-1.5">Templates</p>
+        <div className="flex flex-wrap gap-1.5">
+          {STRATEGY_TEMPLATES.map((t) => (
+            <button key={t.key} onClick={() => setLegs(buildTemplate(t.key, atmStrike, chain))}
+              className="text-[11px] px-2 py-1 rounded-md bg-gray-800 text-gray-300 hover:bg-violet-500/20 hover:text-violet-300 cursor-pointer active:scale-95 transition-all duration-200">
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        {legs.map((leg) => (
+          <div key={leg.id} className="flex items-center gap-1.5 text-xs">
+            <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, action: l.action === "BUY" ? "SELL" : "BUY" } : l)))}
+              className={`px-2 py-1 rounded-md font-semibold w-12 cursor-pointer ${leg.action === "BUY" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>{leg.action}</button>
+            <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, side: l.side === "CE" ? "PE" : "CE" } : l)))}
+              className={`px-2 py-1 rounded-md font-semibold w-10 cursor-pointer ${leg.side === "CE" ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>{leg.side}</button>
+            <select value={leg.strike} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, strike: Number(e.target.value) } : l)))}
+              className="bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white cursor-pointer">
+              {strikes.map((s) => <option key={s} value={s}>{s.toLocaleString("en-IN")}</option>)}
+            </select>
+            <input type="number" min={1} value={leg.lots} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, lots: Math.max(1, parseInt(e.target.value, 10) || 1) } : l)))}
+              className="w-14 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white" />
+            <span className="text-gray-500">@{INR}{legPremium(leg, chain).toFixed(1)}</span>
+            <button onClick={() => setLegs((ls) => ls.filter((l) => l.id !== leg.id))} className="text-red-400 hover:text-red-300 cursor-pointer ml-auto px-1" aria-label="Remove leg">✕</button>
+          </div>
+        ))}
+        <button onClick={() => setLegs((ls) => [...ls, { id: (legIdCounter += 1), action: "BUY", side: "CE", strike: atmStrike, lots: 1 }])}
+          className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer">+ Add leg</button>
+      </div>
+
+      {metrics && legs.length > 0 && (
+        <div className="bg-gray-800 rounded-lg p-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs mb-2">
+            <div><p className="text-gray-500">{metrics.netPremium >= 0 ? "Net credit" : "Net debit"}</p><p className="text-white font-medium">{INR}{Math.abs(metrics.netPremium).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</p></div>
+            <div><p className="text-gray-500">Max profit</p><p className="text-green-400 font-medium">{fmtMoney(metrics.maxProfit)}</p></div>
+            <div><p className="text-gray-500">Max loss</p><p className="text-red-400 font-medium">{fmtMoney(metrics.maxLoss)}</p></div>
+            <div><p className="text-gray-500">Breakeven</p><p className="text-white font-medium">{metrics.breakevens.length ? metrics.breakevens.join(", ") : "—"}</p></div>
+          </div>
+          <div className="h-40 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={metrics.points} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
+                <YAxis stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
+                <Tooltip formatter={(v) => `${INR}${Number(v).toLocaleString("en-IN")}`} labelFormatter={(l) => `Underlying ${l}`} contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }} />
+                <ReferenceLine y={0} stroke="#4b5563" />
+                <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="text-[10px] text-gray-600 mt-1">Combined payoff at expiry.</p>
+          <button
+            onClick={placeStrategy}
+            disabled={placingStrategy || hasShort || !userId}
+            className={`${INTERACTION_CLASSES.primaryButton} w-full mt-2 py-2.5 rounded-lg text-sm font-semibold text-white`}
+          >
+            {placingStrategy ? "Placing…" : `Place strategy (${legs.length} leg${legs.length > 1 ? "s" : ""})`}
+          </button>
+          {hasShort && (
+            <p className="text-[10px] text-amber-400 mt-1">
+              Short/writing legs can&apos;t be placed yet (engine is long-only). All-long strategies like straddle/strangle can be placed.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

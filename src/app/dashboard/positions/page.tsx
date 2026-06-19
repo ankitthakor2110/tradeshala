@@ -29,7 +29,8 @@ import { POSITIONS_CONFIG } from "@/config/positions";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { usePositions, type PositionView } from "@/hooks/usePositions";
 import { closePosition, addToPosition } from "@/services/trade-engine.service";
-import { getRecentOrders, setPositionRisk } from "@/services/positions.service";
+import { getRecentOrders, setPositionRisk, setPositionTargets } from "@/services/positions.service";
+import { getMarketStatus } from "@/services/dashboard.service";
 import { getOptionGreeks, type OptionGreeks } from "@/services/market-data.service";
 import { showToast } from "@/components/ui/Toast";
 import type { Order } from "@/types/database";
@@ -328,9 +329,11 @@ function PositionDetail({
   onClose,
   onAdd,
   onSaveRisk,
+  onSaveTargets,
   closing,
   adding,
   savingRisk,
+  savingTargets,
   fills,
   fillsLoading,
   greeks,
@@ -344,9 +347,11 @@ function PositionDetail({
     alert_price: number | null;
     trail_amount: number | null;
   }) => void;
+  onSaveTargets: (targets: { price: number; qty: number }[]) => void;
   closing: boolean;
   adding: boolean;
   savingRisk: boolean;
+  savingTargets: boolean;
   fills: Order[];
   fillsLoading: boolean;
   greeks: OptionGreeks | null;
@@ -357,6 +362,9 @@ function PositionDetail({
   const [tgt, setTgt] = useState(p.target != null ? String(p.target) : "");
   const [alertPrice, setAlertPrice] = useState(p.alert_price != null ? String(p.alert_price) : "");
   const [trail, setTrail] = useState(p.trail_amount != null ? String(p.trail_amount) : "");
+  const [targetRows, setTargetRows] = useState<{ price: string; qty: string }[]>(
+    (p.targets ?? []).map((t) => ({ price: String(t.price), qty: String(t.qty) }))
+  );
   const numOrNull = (s: string) => {
     const n = parseFloat(s);
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -391,9 +399,11 @@ function PositionDetail({
       </div>
 
       {p.instrument_type !== "EQ" && greeks && (
-        <div className="grid grid-cols-3 gap-3 text-xs mb-3 bg-gray-800/40 rounded-lg p-2">
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 text-xs mb-3 bg-gray-800/40 rounded-lg p-2">
           <div><p className="text-gray-500">Delta</p><p className="text-white font-medium">{greeks.delta.toFixed(2)}</p></div>
+          <div><p className="text-gray-500">Gamma</p><p className="text-white font-medium">{greeks.gamma.toFixed(3)}</p></div>
           <div><p className="text-gray-500">Theta</p><p className="text-white font-medium">{greeks.theta.toFixed(2)}</p></div>
+          <div><p className="text-gray-500">Vega</p><p className="text-white font-medium">{greeks.vega.toFixed(2)}</p></div>
           <div><p className="text-gray-500">IV</p><p className="text-white font-medium">{greeks.iv.toFixed(2)}%</p></div>
         </div>
       )}
@@ -506,6 +516,57 @@ function PositionDetail({
       </div>
       <p className="text-[10px] text-gray-600 mb-3">SL / Target / Trailing auto-close while this page is open.</p>
 
+      {/* Scale-out (multi-target) exits */}
+      <div className="mb-3">
+        <p className="text-xs font-semibold text-gray-300 mb-1">Scale-out targets</p>
+        <div className="space-y-1.5">
+          {targetRows.map((row, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                type="number" step="0.05" value={row.price} placeholder="Price"
+                onChange={(e) => setTargetRows((rows) => rows.map((r, j) => (j === i ? { ...r, price: e.target.value } : r)))}
+                className={`w-24 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`}
+              />
+              <input
+                type="number" value={row.qty} placeholder="Qty"
+                onChange={(e) => setTargetRows((rows) => rows.map((r, j) => (j === i ? { ...r, qty: e.target.value } : r)))}
+                className={`w-20 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-xs text-white ${INTERACTION_CLASSES.formInput}`}
+              />
+              <button
+                onClick={() => setTargetRows((rows) => rows.filter((_, j) => j !== i))}
+                className="text-red-400 hover:text-red-300 cursor-pointer text-xs px-1"
+                aria-label="Remove target"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center gap-3 mt-1.5">
+          <button
+            onClick={() => setTargetRows((rows) => [...rows, { price: "", qty: "" }])}
+            className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer"
+          >
+            + Add target
+          </button>
+          <button
+            onClick={() =>
+              onSaveTargets(
+                targetRows
+                  .map((r) => ({ price: parseFloat(r.price), qty: parseInt(r.qty, 10) }))
+                  .filter((t) => Number.isFinite(t.price) && t.price > 0 && Number.isFinite(t.qty) && t.qty > 0)
+              )
+            }
+            disabled={savingTargets}
+            className={`${INTERACTION_CLASSES.secondaryButton} text-[11px] text-gray-200 px-3 py-1 rounded-md flex items-center gap-1.5`}
+          >
+            {savingTargets ? <ButtonLoader /> : null}
+            Save targets
+          </button>
+        </div>
+        <p className="text-[10px] text-gray-600 mt-1">Each level partial-closes its qty (shares) when LTP reaches the price, while the page is open.</p>
+      </div>
+
       <div>
         <p className="text-xs text-gray-400 mb-1">Recent fills</p>
         {fillsLoading ? (
@@ -563,16 +624,45 @@ export default function PositionsPage() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [grouped, setGrouped] = useState(false);
+  const [autoSquareOff, setAutoSquareOff] = useState(false);
   const [addingId, setAddingId] = useState<string | null>(null);
   const [savingRiskId, setSavingRiskId] = useState<string | null>(null);
+  const [savingTargetsId, setSavingTargetsId] = useState<string | null>(null);
   const [fills, setFills] = useState<Order[]>([]);
   const [fillsLoading, setFillsLoading] = useState(false);
   const [greeks, setGreeks] = useState<OptionGreeks | null>(null);
-  const [netGreeks, setNetGreeks] = useState<{ delta: number; theta: number; count: number } | null>(null);
+  const [netGreeks, setNetGreeks] = useState<{ delta: number; theta: number; vega: number; count: number } | null>(null);
   const triggeredRef = useRef<Set<string>>(new Set());
   const alertedRef = useRef<Set<string>>(new Set());
   const prevPriceRef = useRef<Map<string, number>>(new Map());
   const trailPeakRef = useRef<Map<string, number>>(new Map());
+  const targetHitRef = useRef<Set<string>>(new Set());
+  const squaredOffRef = useRef(false);
+
+  // Load persisted auto-square-off preference (client-only).
+  useEffect(() => {
+    setAutoSquareOff(localStorage.getItem("ts_auto_squareoff") === "1");
+  }, []);
+
+  // Auto square-off: close all open positions at the cutoff during market hours.
+  useEffect(() => {
+    if (!autoSquareOff) return;
+    const check = () => {
+      if (squaredOffRef.current || openPositions.length === 0) return;
+      const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      const mins = ist.getHours() * 60 + ist.getMinutes();
+      const cutoff = POSITIONS_CONFIG.squareOff.hour * 60 + POSITIONS_CONFIG.squareOff.minute;
+      if (getMarketStatus() && mins >= cutoff) {
+        squaredOffRef.current = true;
+        showToast("Auto square-off — closing all open positions", "info");
+        handleCloseAll();
+      }
+    };
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSquareOff, openPositions]);
 
   const toggleExpand = useCallback(
     async (p: PositionView) => {
@@ -729,6 +819,20 @@ export default function PositionsPage() {
     [refresh]
   );
 
+  const handleSaveTargets = useCallback(
+    async (positionId: string, targets: { price: number; qty: number }[]) => {
+      setSavingTargetsId(positionId);
+      const ok = await setPositionTargets(positionId, targets);
+      showToast(ok ? "Scale-out targets saved" : "Failed to save targets", ok ? "success" : "error");
+      for (const k of Array.from(targetHitRef.current)) {
+        if (k.startsWith(`${positionId}:`)) targetHitRef.current.delete(k);
+      }
+      await refresh();
+      setSavingTargetsId(null);
+    },
+    [refresh]
+  );
+
   // Client-side GTT: while this page is open, auto-close on SL/Target and toast
   // on alert crossings, driven by the live price overlay.
   useEffect(() => {
@@ -752,6 +856,19 @@ export default function PositionsPage() {
           showToast(`${p.symbol}: trailing stop hit — closing`, "error");
           handleClosePosition(p.id);
         }
+      }
+      // Multi-target scale-out: partial-close qty as each level is reached.
+      if (p.targets && p.targets.length > 0) {
+        p.targets.forEach((t, idx) => {
+          const key = `${p.id}:${idx}:${t.price}`;
+          if (targetHitRef.current.has(key) || ltp < t.price) return;
+          targetHitRef.current.add(key);
+          const qty = Math.min(t.qty, p.quantity);
+          if (qty > 0) {
+            showToast(`${p.symbol}: target ${t.price} hit — exiting ${qty}`, "success");
+            handleClosePosition(p.id, qty);
+          }
+        });
       }
       const prev = prevPriceRef.current.get(p.id);
       if (p.alert_price != null && prev !== undefined && !alertedRef.current.has(p.id)) {
@@ -789,15 +906,17 @@ export default function PositionsPage() {
       if (!active) return;
       let delta = 0;
       let theta = 0;
+      let vega = 0;
       let any = false;
       results.forEach((g, i) => {
         if (g) {
           any = true;
           delta += g.delta * opts[i].quantity;
           theta += g.theta * opts[i].quantity;
+          vega += g.vega * opts[i].quantity;
         }
       });
-      setNetGreeks(any ? { delta, theta, count: opts.length } : null);
+      setNetGreeks(any ? { delta, theta, vega, count: opts.length } : null);
     })();
     return () => {
       active = false;
@@ -1136,7 +1255,7 @@ export default function PositionsPage() {
             <h3 className="text-sm md:text-base font-semibold text-white">Options book — net Greeks</h3>
             <span className="text-xs text-gray-400">{netGreeks.count} option positions</span>
           </div>
-          <div className="grid grid-cols-2 gap-3 text-xs">
+          <div className="grid grid-cols-3 gap-3 text-xs">
             <div>
               <p className="text-gray-500">Net Delta</p>
               <p className={`font-medium ${getPnLColor(netGreeks.delta)}`}>{netGreeks.delta.toFixed(2)}</p>
@@ -1144,6 +1263,10 @@ export default function PositionsPage() {
             <div>
               <p className="text-gray-500">Net Theta</p>
               <p className={`font-medium ${getPnLColor(netGreeks.theta)}`}>{netGreeks.theta.toFixed(2)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Net Vega</p>
+              <p className={`font-medium ${getPnLColor(netGreeks.vega)}`}>{netGreeks.vega.toFixed(2)}</p>
             </div>
           </div>
           <p className="text-[10px] text-gray-600 mt-2">
@@ -1287,6 +1410,18 @@ export default function PositionsPage() {
         >
           Export CSV
         </button>
+        <button
+          onClick={() => {
+            const v = !autoSquareOff;
+            setAutoSquareOff(v);
+            localStorage.setItem("ts_auto_squareoff", v ? "1" : "0");
+            if (v) squaredOffRef.current = false;
+          }}
+          title="Close all open positions at 15:20 IST while this page is open"
+          className={`text-xs px-3 py-2 rounded-lg border cursor-pointer active:scale-95 transition-all duration-200 ${autoSquareOff ? "border-amber-500/50 text-amber-400 bg-amber-500/10" : "border-gray-700 text-gray-300 hover:border-violet-500/50"}`}
+        >
+          Auto SQ-off 15:20
+        </button>
       </div>
 
       {/* OPEN */}
@@ -1366,9 +1501,11 @@ export default function PositionsPage() {
                             onClose={(qty) => handleClosePosition(p.id, qty)}
                             onAdd={(qty) => handleAdd(p.id, qty)}
                             onSaveRisk={(f) => handleSaveRisk(p.id, f)}
+                            onSaveTargets={(t) => handleSaveTargets(p.id, t)}
                             closing={closingId === p.id}
                             adding={addingId === p.id}
                             savingRisk={savingRiskId === p.id}
+                            savingTargets={savingTargetsId === p.id}
                             fills={fills}
                             fillsLoading={fillsLoading}
                             greeks={greeks}
@@ -1525,9 +1662,11 @@ export default function PositionsPage() {
                                 onClose={(qty) => handleClosePosition(p.id, qty)}
                                 onAdd={(qty) => handleAdd(p.id, qty)}
                                 onSaveRisk={(f) => handleSaveRisk(p.id, f)}
+                                onSaveTargets={(t) => handleSaveTargets(p.id, t)}
                                 closing={closingId === p.id}
                                 adding={addingId === p.id}
                                 savingRisk={savingRiskId === p.id}
+                                savingTargets={savingTargetsId === p.id}
                                 fills={fills}
                                 fillsLoading={fillsLoading}
                                 greeks={greeks}

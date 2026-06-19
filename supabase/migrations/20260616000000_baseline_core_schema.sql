@@ -159,6 +159,7 @@ create table if not exists public.positions (
   target          numeric,
   alert_price     numeric,
   trail_amount    numeric,
+  targets         jsonb,
   opened_at       timestamptz not null default now(),
   closed_at       timestamptz,
   updated_at      timestamptz not null default now()
@@ -280,6 +281,7 @@ alter table public.positions
   add column if not exists target numeric,
   add column if not exists alert_price numeric,
   add column if not exists trail_amount numeric,
+  add column if not exists targets jsonb,
   add column if not exists opened_at timestamptz not null default now(),
   add column if not exists closed_at timestamptz,
   add column if not exists updated_at timestamptz not null default now();
