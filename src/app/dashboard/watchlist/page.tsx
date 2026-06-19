@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
 import { searchStocks } from "@/services/market-data.service";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { WATCHLIST_CONFIG } from "@/config/watchlist";
@@ -62,6 +63,9 @@ export default function WatchlistPage() {
     [watchlist]
   );
   const { quotes: liveQuotes } = useLiveQuotes(watchedSymbols);
+  // Keep server-side live_quotes fresh while this page is open (Hobby cron is
+  // daily-only); only poll once there's something watched to refresh.
+  useSnapshotPoller(watchedSymbols.length > 0);
 
   // Load persisted watchlist on mount
   useEffect(() => {

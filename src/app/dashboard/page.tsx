@@ -14,6 +14,7 @@ import { getPnLColor } from "@/utils/colors";
 import { timeAgo } from "@/utils/format";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
 import IndexCard, { IndexCardSkeleton } from "@/components/dashboard/IndexCard";
 import LiveBadge from "@/components/ui/LiveBadge";
 import type { DashboardStats, IndexData, StockGainerLoser } from "@/types/database";
@@ -63,8 +64,11 @@ function DashboardContent() {
   const [moversLastUpdated, setMoversLastUpdated] = useState<string | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Live index prices pushed over Supabase Realtime (no polling).
+  // Live index prices pushed over Supabase Realtime. The poller keeps the
+  // server-side `live_quotes` table fresh while this page is open (replaces the
+  // per-minute Vercel Cron loop, which Hobby caps at once/day).
   const { quotes: liveQuotes } = useLiveQuotes(["NIFTY 50", "BANK NIFTY"]);
+  useSnapshotPoller();
 
   const { labels, currency } = dashboardConfig;
 

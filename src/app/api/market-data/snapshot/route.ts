@@ -1,50 +1,19 @@
 import { NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getActiveUniverse } from "@/lib/market-data/universe";
-import { fetchLtpBatch, isUpstoxConfigured } from "@/lib/market-data/upstox";
+import { isUpstoxConfigured } from "@/lib/market-data/upstox";
+import { snapshotOnce } from "@/lib/market-data/snapshot";
 import { getMarketStatus } from "@/services/dashboard.service";
 
-// Pro plan: functions/cron may run up to 800s. Vercel Cron fires this every
-// minute; within one invocation we loop, refreshing every ~10s, so the live
-// table stays fresh between cron ticks. (On Hobby, cron runs only daily.)
-export const maxDuration = 800;
+// Hobby caps serverless functions at 300s (and cron at once/day). Intra-day
+// refresh is driven by the client poller (useSnapshotPoller) writing via the
+// /refresh route; this cron pass loops within its budget as a daily backstop.
+export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 const REFRESH_INTERVAL_MS = 10_000;
 const SAFETY_MARGIN_MS = 15_000; // stop looping before the function is killed
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** One pass: resolve the universe, fetch LTPs, upsert into live_quotes. */
-async function snapshotOnce(
-  admin: ReturnType<typeof createAdminClient>
-): Promise<number> {
-  const universe = await getActiveUniverse(admin);
-  if (universe.length === 0) return 0;
-
-  const quotes = await fetchLtpBatch(universe);
-  if (quotes.length === 0) return 0;
-
-  const nowIso = new Date().toISOString();
-  const rows = quotes.map((q) => ({
-    symbol: q.symbol,
-    exchange: q.exchange,
-    ltp: q.ltp,
-    prev_close: q.prev_close,
-    change: q.change,
-    change_percent: q.change_percent,
-    volume: q.volume,
-    ts: nowIso,
-    updated_at: nowIso,
-  }));
-
-  const { error } = await admin
-    .from("live_quotes")
-    .upsert(rows as never, { onConflict: "symbol" });
-
-  if (error) throw new Error(`live_quotes upsert failed: ${error.message}`);
-  return rows.length;
-}
 
 export async function GET(request: NextRequest) {
   // Auth: Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` when the env
