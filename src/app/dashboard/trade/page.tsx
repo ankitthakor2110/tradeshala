@@ -103,7 +103,7 @@ export default function TradePage() {
   const [selectedOptionLtp, setSelectedOptionLtp] = useState<number | null>(null);
   const [selectedSide, setSelectedSide] = useState<"CE" | "PE">("CE");
   const [flashStrike, setFlashStrike] = useState<number | null>(null);
-  const [visibleCols, setVisibleCols] = useState({ oi: true, oiChg: false, vol: false, iv: true, delta: false, bidAsk: false });
+  const [visibleCols, setVisibleCols] = useState({ oi: true, oiChg: false, vol: false, iv: true, delta: false, gamma: false, theta: false, vega: false, bidAsk: false });
   const [showColMenu, setShowColMenu] = useState(false);
 
   const [tradeType, setTradeType] = useState<TradeType>("BUY");
@@ -476,7 +476,7 @@ export default function TradePage() {
                         {(Object.keys(visibleCols) as (keyof typeof visibleCols)[]).map((col) => (
                           <label key={col} className="flex items-center gap-2 text-[10px] text-gray-300 cursor-pointer hover:text-white">
                             <input type="checkbox" checked={visibleCols[col]} onChange={() => setVisibleCols((p) => ({ ...p, [col]: !p[col] }))} className="w-3 h-3 rounded cursor-pointer" />
-                            {({ oi: "OI", oiChg: "OI Change", vol: "Volume", iv: "IV", delta: "Delta", bidAsk: "Bid/Ask" })[col]}
+                            {({ oi: "OI", oiChg: "OI Change", vol: "Volume", iv: "IV", delta: "Delta", gamma: "Gamma", theta: "Theta", vega: "Vega", bidAsk: "Bid/Ask" })[col]}
                           </label>
                         ))}
                       </div>
@@ -492,13 +492,19 @@ export default function TradePage() {
                           {visibleCols.oiChg && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5">OI CHG</th>}
                           {visibleCols.vol && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5">VOL</th>}
                           {visibleCols.iv && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Implied Volatility — expected price movement">IV</th>}
-                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Rate of change vs underlying price">{"\u0394"}</th>}
+                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Delta \u2014 rate of change vs underlying price">{"\u0394"}</th>}
+                          {visibleCols.gamma && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Gamma \u2014 rate of change of delta">{"\u0393"}</th>}
+                          {visibleCols.theta && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Theta \u2014 daily time decay">{"\u0398"}</th>}
+                          {visibleCols.vega && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Vega \u2014 sensitivity to a 1% change in IV">V</th>}
                           {visibleCols.bidAsk && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5">B/A</th>}
                           <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5 font-bold">CE</th>
                           <th className="py-1.5 px-2 text-center text-violet-400 bg-violet-500/5 font-bold sticky left-0 bg-gray-900 z-10">STRIKE</th>
                           <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5 font-bold">PE</th>
                           {visibleCols.bidAsk && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">B/A</th>}
-                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">{"\u0394"}</th>}
+                          {visibleCols.vega && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Vega \u2014 sensitivity to a 1% change in IV">V</th>}
+                          {visibleCols.theta && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Theta \u2014 daily time decay">{"\u0398"}</th>}
+                          {visibleCols.gamma && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Gamma \u2014 rate of change of delta">{"\u0393"}</th>}
+                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Delta \u2014 rate of change vs underlying price">{"\u0394"}</th>}
                           {visibleCols.iv && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">IV</th>}
                           {visibleCols.vol && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">VOL</th>}
                           {visibleCols.oiChg && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">OI CHG</th>}
@@ -516,6 +522,7 @@ export default function TradePage() {
                           const pcrBg = row.pcr > 1.2 ? "bg-green-500/20 text-green-400" : row.pcr < 0.8 ? "bg-red-500/20 text-red-400" : "bg-gray-500/20 text-gray-400";
                           const ivColor = (iv: number) => iv > 20 ? "text-red-400" : iv > 16 ? "text-orange-400" : iv > 12 ? "text-yellow-400" : "text-green-400";
                           const dColor = (d: number) => Math.abs(d) > 0.5 ? (d > 0 ? "text-green-400" : "text-red-400") : Math.abs(d) > 0.3 ? "text-yellow-400" : "text-gray-500";
+                          const tColor = (t: number) => t < 0 ? "text-red-400" : "text-gray-400";
 
                           return (
                             <tr key={row.strike_price} className={`border-b border-gray-800/30 transition-colors duration-100 ${isFlash ? "strike-selected" : ""} ${
@@ -537,6 +544,9 @@ export default function TradePage() {
                               {visibleCols.vol && <td className="py-1.5 px-1.5 text-right text-gray-500">{formatOI(row.ce.volume)}</td>}
                               {visibleCols.iv && <td className={`py-1.5 px-1.5 text-right ${ivColor(row.ce.iv)}`}>{row.ce.iv.toFixed(1)}</td>}
                               {visibleCols.delta && <td className={`py-1.5 px-1.5 text-right ${dColor(row.ce.delta)}`}>{row.ce.delta.toFixed(2)}</td>}
+                              {visibleCols.gamma && <td className="py-1.5 px-1.5 text-right text-gray-400">{row.ce.gamma.toFixed(4)}</td>}
+                              {visibleCols.theta && <td className={`py-1.5 px-1.5 text-right ${tColor(row.ce.theta)}`}>{row.ce.theta.toFixed(2)}</td>}
+                              {visibleCols.vega && <td className="py-1.5 px-1.5 text-right text-gray-400">{row.ce.vega.toFixed(2)}</td>}
                               {visibleCols.bidAsk && (
                                 <td className="py-1.5 px-1.5 text-right">
                                   <span className="text-green-400">{row.ce.bid.toFixed(1)}</span>/<span className="text-red-400">{row.ce.ask.toFixed(1)}</span>
@@ -563,6 +573,9 @@ export default function TradePage() {
                                   <span className="text-green-400">{row.pe.bid.toFixed(1)}</span>/<span className="text-red-400">{row.pe.ask.toFixed(1)}</span>
                                 </td>
                               )}
+                              {visibleCols.vega && <td className="py-1.5 px-1.5 text-left text-gray-400">{row.pe.vega.toFixed(2)}</td>}
+                              {visibleCols.theta && <td className={`py-1.5 px-1.5 text-left ${tColor(row.pe.theta)}`}>{row.pe.theta.toFixed(2)}</td>}
+                              {visibleCols.gamma && <td className="py-1.5 px-1.5 text-left text-gray-400">{row.pe.gamma.toFixed(4)}</td>}
                               {visibleCols.delta && <td className={`py-1.5 px-1.5 text-left ${dColor(row.pe.delta)}`}>{row.pe.delta.toFixed(2)}</td>}
                               {visibleCols.iv && <td className={`py-1.5 px-1.5 text-left ${ivColor(row.pe.iv)}`}>{row.pe.iv.toFixed(1)}</td>}
                               {visibleCols.vol && <td className="py-1.5 px-1.5 text-left text-gray-500">{formatOI(row.pe.volume)}</td>}
@@ -585,7 +598,7 @@ export default function TradePage() {
                         {/* Summary row */}
                         <tr className="border-t border-gray-700">
                           {visibleCols.oi && <td className="py-1.5 px-1.5 text-right text-green-400 font-semibold">{formatOI(chain.reduce((s, r) => s + r.ce.oi, 0))}</td>}
-                          {visibleCols.oiChg && <td />}{visibleCols.vol && <td />}{visibleCols.iv && <td />}{visibleCols.delta && <td />}{visibleCols.bidAsk && <td />}
+                          {visibleCols.oiChg && <td />}{visibleCols.vol && <td />}{visibleCols.iv && <td />}{visibleCols.delta && <td />}{visibleCols.gamma && <td />}{visibleCols.theta && <td />}{visibleCols.vega && <td />}{visibleCols.bidAsk && <td />}
                           <td className="py-1.5 px-1.5 text-right text-[10px] text-gray-500">TOTAL</td>
                           <td className="py-1.5 px-2 text-center sticky left-0 bg-gray-900 z-10">
                             <span className={`text-[10px] px-1.5 py-0.5 rounded ${chain[0]?.totalPeOI && chain[0]?.totalCeOI ? (chain[0].totalPeOI / chain[0].totalCeOI > 1 ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400") : "text-gray-500"}`}>
@@ -593,7 +606,7 @@ export default function TradePage() {
                             </span>
                           </td>
                           <td className="py-1.5 px-1.5 text-left text-[10px] text-gray-500">TOTAL</td>
-                          {visibleCols.bidAsk && <td />}{visibleCols.delta && <td />}{visibleCols.iv && <td />}{visibleCols.vol && <td />}{visibleCols.oiChg && <td />}
+                          {visibleCols.bidAsk && <td />}{visibleCols.vega && <td />}{visibleCols.theta && <td />}{visibleCols.gamma && <td />}{visibleCols.delta && <td />}{visibleCols.iv && <td />}{visibleCols.vol && <td />}{visibleCols.oiChg && <td />}
                           {visibleCols.oi && <td className="py-1.5 px-1.5 text-left text-red-400 font-semibold">{formatOI(chain.reduce((s, r) => s + r.pe.oi, 0))}</td>}
                         </tr>
                       </tbody>
