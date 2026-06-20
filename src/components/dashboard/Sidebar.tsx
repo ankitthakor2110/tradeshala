@@ -1,8 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { dashboardConfig } from "@/config/dashboard";
+import { getCurrentUser } from "@/services/auth.service";
+import { canReconnectUpstox } from "@/config/admin";
 import BrandLogo from "@/components/ui/BrandLogo";
 import SidebarIcon from "./SidebarIcon";
 
@@ -13,6 +16,20 @@ interface SidebarProps {
 export default function Sidebar({ onClose }: SidebarProps) {
   const pathname = usePathname();
   const { sidebar } = dashboardConfig;
+
+  // "Data & Brokers" is hidden by default; reveal it only for the user who
+  // manages the shared Upstox connection (same gate as the reconnect banner),
+  // so they can save credentials without hunting for the hidden URL.
+  const [canManageBroker, setCanManageBroker] = useState(false);
+  useEffect(() => {
+    let active = true;
+    getCurrentUser().then((user) => {
+      if (active && canReconnectUpstox(user?.email)) setCanManageBroker(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   function isActive(href: string): boolean {
     if (href === "/dashboard") return pathname === "/dashboard";
@@ -36,7 +53,11 @@ export default function Sidebar({ onClose }: SidebarProps) {
       {/* Navigation */}
       <nav className="flex-1 flex flex-col gap-1 py-4 px-3 overflow-y-auto">
         {sidebar.items
-          .filter((item) => item.visible !== false)
+          .filter(
+            (item) =>
+              item.visible !== false ||
+              (item.href === "/dashboard/broker" && canManageBroker)
+          )
           .map((item) => (
             <Link
               key={item.href}

@@ -37,7 +37,7 @@ export async function getActiveBroker(
       .select("*")
       .eq("user_id", userId)
       .eq("is_active", true)
-      .single<BrokerConnection>();
+      .maybeSingle<BrokerConnection>();
 
     if (error || !data) return null;
 

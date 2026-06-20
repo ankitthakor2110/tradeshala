@@ -138,6 +138,9 @@ function BrokerPageContent() {
     } else if (status === "error") {
       showToast(friendlyError(message ?? "OAuth flow failed"), "error");
       router.replace("/dashboard/broker");
+    } else if (status === "setup") {
+      showToast(message ?? "Add your Upstox API Key below to enable reconnect.", "info");
+      router.replace("/dashboard/broker");
     }
   }, [searchParams, loadData, router]);
 
