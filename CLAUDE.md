@@ -11,6 +11,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run start` — Start production server
 - `npm run lint` — Run ESLint (flat config, Next.js core-web-vitals + TypeScript)
 
+There is **no test runner** wired up (no Jest/Vitest/Playwright, no `test` script). Verification is `npm run lint` + `npm run build`. Don't reference a test command that doesn't exist.
+
 ## Tech Stack
 
 - **Next.js 16.2.1** with App Router (`src/app/`)
@@ -49,8 +51,9 @@ All user-visible strings, labels, mock data, and content live in config files un
 
 - **Client-side:** `src/lib/supabase/client.ts` — browser client via `createBrowserClient`
 - **Server-side:** `src/lib/supabase/server.ts` — server client via `createServerClient` (uses `cookies()`)
+- **Admin (service-role):** `src/lib/supabase/admin.ts` — `createAdminClient()` uses `SUPABASE_SERVICE_ROLE_KEY` and bypasses RLS. Used **only** by trusted server contexts (cron + the snapshot refresh route) to write the shared `live_quotes` table. Never import this into client code.
 - **Middleware:** `src/proxy.ts` exports the middleware function; calls `src/lib/supabase/middleware.ts` to refresh sessions, protect routes (`/dashboard`, `/portfolio`, `/trades`, `/watchlist` redirect to `/login`), and gate admin-only routes (`/connection-status`) on server-side `ADMIN_EMAIL` env match (non-admins are bounced to `/dashboard?error=unauthorized`)
-- **Env vars required:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ADMIN_EMAIL` (server) and `NEXT_PUBLIC_ADMIN_EMAIL` (client, used by `useAdmin` hook) — keep them equal. Broker/market-data keys (e.g. `DHAN_*`, `UPSTOX_*`) live server-side only. See `.env.local.example`.
+- **Env vars required:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ADMIN_EMAIL` (server) and `NEXT_PUBLIC_ADMIN_EMAIL` (client, used by `useAdmin` hook) — keep them equal. Broker/market-data keys (e.g. `DHAN_*`, `UPSTOX_*`), the `SUPABASE_SERVICE_ROLE_KEY` (admin client), and `CRON_SECRET` (Vercel Cron Bearer auth) live server-side only. See `.env.local.example`.
 - **Database types:** `src/types/database.ts` — typed `Database` interface for tables: `profiles`, `portfolios`, `trades`, `watchlist`, `holdings`, `broker_connections`. The `orders` and `positions` tables exist in the DB (used by the trade engine) but are typed inline via `Order` / `Position` interfaces rather than listed in the `Database` schema — cast inserts with `as never` when writing to them (see `trade-engine.service.ts`).
 
 ### API Routes (`src/app/api/`)
@@ -60,6 +63,9 @@ All provider/broker I/O and any access to server-only env vars must happen in ro
 - `api/trade/{expiries,option-chain}` — derivatives data for the trade simulator
 - `api/broker/*` — broker OAuth / connection flows (Upstox, Zerodha)
 - `api/admin/env-status` — admin-only diagnostics, consumed by `/connection-status`
+- `api/market-data/snapshot` — Vercel Cron entry (GET, gated by `Authorization: Bearer ${CRON_SECRET}`); see Live Market Data below
+- `api/market-data/snapshot/refresh` — client-driven refresh (POST, gated by the caller's Supabase session); see Live Market Data below
+- `api/cron/upstox-reauth` — daily cron that surfaces/repairs Upstox token expiry (also `CRON_SECRET`-gated)
 
 Client code reaches these via helpers in `src/services/market-data.service.ts` (thin `fetch` wrappers that return typed shapes).
 
@@ -76,7 +82,17 @@ Business logic lives in `src/services/`, not in components or route handlers. Ro
 - `src/services/dashboard.service.ts` — getMarketStatus (IST market hours), getGreeting, getPortfolioStats
 - `src/services/market-data.service.ts` — client-side fetchers that call `/api/market-data/*`
 - `src/services/broker.service.ts` — broker-connection CRUD against the `broker_connections` table (get active/all connections, connect/test) via the browser Supabase client
-- `src/services/trade-engine.service.ts` — order validation, fill simulation (slippage + brokerage from `TRADE_CONFIG.simulation`), position upsert/close, P&L math. Writes to `orders` + `positions` and calls the Postgres RPCs `deduct_virtual_cash` / `add_virtual_cash` to move the user's `virtual_balance`. MARKET orders fill instantly; LIMIT/SL/SL-M stay `PENDING` until price condition is met.
+- `src/services/trade-engine.service.ts` — order validation, fill simulation (slippage + brokerage from `TRADE_CONFIG.simulation`), position upsert/close, P&L math. Writes to `orders` + `positions` and calls the Postgres RPCs `deduct_virtual_cash` / `add_virtual_cash` to move the user's `virtual_balance`. MARKET orders fill instantly; LIMIT/SL/SL-M stay `PENDING` until price condition is met. Also executes multi-leg option strategies (all-long legs placed together).
+- `src/services/positions.service.ts` — read/aggregate the user's open/closed positions for the positions page.
+
+### Live Market Data: Snapshot + Realtime
+
+Intra-day prices flow through a shared Postgres table, **not** per-client provider calls. Understand all four pieces together:
+
+- **`snapshotOnce(admin)`** (`src/lib/market-data/snapshot.ts`) — one pass: resolve the active universe (`universe.ts`), batch-fetch LTPs from Upstox (`fetchLtpBatch`), and upsert into `live_quotes` (keyed on `symbol`). Returns rows written.
+- **Server writers** — two callers of `snapshotOnce`: the Vercel Cron route (`api/market-data/snapshot`, `CRON_SECRET`-gated, loops within its 300s budget while the market is open) and the client-triggered route (`api/market-data/snapshot/refresh`, session-gated, one pass per call, throttled by `MIN_REFRESH_GAP_MS` so many tabs collapse into ~one provider call per window).
+- **`useSnapshotPoller`** (client) — while a live page is mounted, periodically calls the refresh route. Pauses when the tab is hidden or the market is closed. This exists because the **Vercel Hobby plan caps cron at once/day**; on Pro the cron writer alone would keep data fresh.
+- **`useLiveQuotes`** (client) — subscribes to `live_quotes` via Supabase **Realtime**; rows written by any server writer fan out to every open tab. So one poller refreshes prices for all clients — never call providers from the browser.
 
 ### Admin Gating
 
@@ -97,6 +113,8 @@ Types are split by domain under `src/types/`:
 - `useAuthRedirect.ts` — redirects based on auth state
 - `useBrokerConnection.ts` — derives active-broker connection state (connected, expiry/expiring-soon) from `broker.service.ts`
 - `useIsMounted.ts` — the mounted-state helper used to avoid hydration mismatches (see Hydration Rules)
+- `useLiveQuotes.ts` / `useSnapshotPoller.ts` — Realtime price subscription and the client-side snapshot poller (see Live Market Data)
+- `usePositions.ts` — derives the user's positions/P&L state from `positions.service.ts`
 
 ### Shared Utilities
 
