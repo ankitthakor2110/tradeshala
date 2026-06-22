@@ -135,6 +135,37 @@ export async function getOptionGreeks(
   }
 }
 
+export interface Candle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+/**
+ * Intraday candles for an underlying, for the price chart on the trade ticket.
+ * Pass the live LTP so the mock fallback (used when no provider is configured)
+ * anchors to the current price. Returns candles oldest-first.
+ */
+export async function getCandles(
+  symbol: string,
+  interval: "1minute" | "30minute" = "30minute",
+  ltp = 0
+): Promise<{ candles: Candle[]; source: string }> {
+  try {
+    const res = await fetch(
+      `/api/trade/candles?symbol=${encodeURIComponent(symbol)}&interval=${interval}&ltp=${ltp}`
+    );
+    if (!res.ok) return { candles: [], source: "unavailable" };
+    const data = await res.json();
+    return { candles: data.candles ?? [], source: data.source ?? "unavailable" };
+  } catch {
+    return { candles: [], source: "unavailable" };
+  }
+}
+
 export async function getGainersLosers(): Promise<GainersLosersResponse | null> {
   try {
     const res = await fetch("/api/market-data/gainers-losers");

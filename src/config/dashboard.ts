@@ -11,6 +11,7 @@ export const dashboardConfig = {
       { label: "Dashboard", href: "/dashboard", icon: "grid" },
       { label: "Trade", href: "/dashboard/trade", icon: "trade" },
       { label: "Positions", href: "/dashboard/positions", icon: "positions" },
+      { label: "Journal", href: "/dashboard/journal", icon: "journal" },
       { label: "Portfolio", href: "/dashboard/portfolio", icon: "briefcase" },
       { label: "Watchlist", href: "/dashboard/watchlist", icon: "eye" },
       { label: "Data & Brokers", href: "/dashboard/broker", icon: "link", visible: false },

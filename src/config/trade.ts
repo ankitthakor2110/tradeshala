@@ -27,6 +27,11 @@ export const TRADE_CONFIG = {
     slippagePercent: 0.05,
     brokeragePerOrder: 20,
     maxSlippage: 0.1,
+    // Margin blocked when writing (selling-to-open) an option, as a fraction of
+    // the contract notional (strike × shares). ~10% approximates SPAN+exposure
+    // for index options (e.g. NIFTY 24000 × 50 × 0.1 ≈ ₹1.2L/lot). Paper-sim
+    // estimate, not a real SPAN calc.
+    shortMarginPercent: 0.1,
   },
 
   // Approximate Indian statutory charges, as fractions of turnover, used to make
@@ -57,6 +62,39 @@ export const TRADE_CONFIG = {
     FINNIFTY: 40,
     SENSEX: 10,
   } as Record<string, number>,
+
+  // Option chain strike window around ATM. The chain loads `initial` strikes on
+  // each side and "Show more" widens it by `step`, up to `max`.
+  strikeWindow: {
+    initial: 5,
+    step: 5,
+    max: 20,
+  },
+
+  // One-tap SL / target presets, as a percentage of the entry premium.
+  // SL trims the premium (buyer's downside), target grows it (buyer's upside).
+  bracketPresets: {
+    stopLossPercents: [20, 30, 50],
+    targetPercents: [30, 50, 100],
+  },
+
+  // How many recent executed contracts to surface as quick re-entry chips.
+  recentTradesLimit: 6,
+
+  // Labels for derived chain insights (kept here so copy stays out of the page).
+  moneyness: {
+    itm: "ITM",
+    otm: "OTM",
+    atm: "ATM",
+  } as Record<string, string>,
+
+  // OI build-up classification (price move × OI move) — Indian-market convention.
+  buildup: {
+    longBuildup: { label: "Long buildup", tone: "green" },
+    shortBuildup: { label: "Short buildup", tone: "red" },
+    shortCovering: { label: "Short covering", tone: "green" },
+    longUnwinding: { label: "Long unwinding", tone: "red" },
+  } as Record<string, { label: string; tone: "green" | "red" }>,
 
   exchanges: ["NSE", "BSE", "NFO", "BFO"],
 

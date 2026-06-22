@@ -81,6 +81,8 @@ function buildPnLSeries(closed: PositionView[], period: ChartPeriod): ChartPoint
 
 // --- Helpers ---
 function getInstrumentLabel(p: PositionView): string {
+  // Writers (short) are flagged inline so the whole table reads correctly.
+  const tag = p.direction === "SHORT" ? " · SHORT" : "";
   if (p.instrument_type === "CE" || p.instrument_type === "PE") {
     const expiryShort = p.expiry_date
       ? new Date(p.expiry_date).toLocaleDateString("en-IN", {
@@ -90,9 +92,9 @@ function getInstrumentLabel(p: PositionView): string {
       : "";
     return `${p.symbol} ${p.strike_price ?? ""} ${p.instrument_type}${
       expiryShort ? ` · ${expiryShort}` : ""
-    }`;
+    }${tag}`;
   }
-  return p.symbol;
+  return `${p.symbol}${tag}`;
 }
 
 function getInstrumentBadgeClass(type: string): string {
@@ -176,12 +178,15 @@ function payoffPoints(p: PositionView): { s: number; pnl: number }[] {
   const lo = strike * 0.9;
   const hi = strike * 1.1;
   const steps = 25;
+  const short = p.direction === "SHORT";
   const pts: { s: number; pnl: number }[] = [];
   for (let i = 0; i < steps; i++) {
     const s = lo + ((hi - lo) * i) / (steps - 1);
     const intrinsic =
       p.instrument_type === "CE" ? Math.max(0, s - strike) : Math.max(0, strike - s);
-    pts.push({ s: Math.round(s), pnl: Math.round((intrinsic - premium) * qty) });
+    // Long option: intrinsic − premium. Short (writer): the inverse.
+    const longPnl = (intrinsic - premium) * qty;
+    pts.push({ s: Math.round(s), pnl: Math.round(short ? -longPnl : longPnl) });
   }
   return pts;
 }
@@ -838,30 +843,44 @@ export default function PositionsPage() {
   useEffect(() => {
     for (const p of openPositions) {
       const ltp = p.current_price;
+      const isShort = p.direction === "SHORT";
       if (!triggeredRef.current.has(p.id)) {
-        const hitSL = p.stop_loss != null && ltp <= p.stop_loss;
-        const hitTarget = p.target != null && ltp >= p.target;
+        // Short SL is above entry / target below; long is the reverse.
+        const hitSL = p.stop_loss != null && (isShort ? ltp >= p.stop_loss : ltp <= p.stop_loss);
+        const hitTarget = p.target != null && (isShort ? ltp <= p.target : ltp >= p.target);
         if (hitSL || hitTarget) {
           triggeredRef.current.add(p.id);
           showToast(`${p.symbol}: ${hitSL ? "Stop-loss" : "Target"} hit — closing`, hitSL ? "error" : "success");
           handleClosePosition(p.id);
         }
       }
-      // Trailing stop: ratchet the peak up; close if price falls trail below it.
+      // Trailing stop: long ratchets the peak up (close if price drops trail
+      // below it); short ratchets the trough down (close if price rises trail above).
       if (!triggeredRef.current.has(p.id) && p.trail_amount != null && p.trail_amount > 0) {
-        const peak = Math.max(trailPeakRef.current.get(p.id) ?? ltp, ltp);
-        trailPeakRef.current.set(p.id, peak);
-        if (ltp <= peak - p.trail_amount) {
-          triggeredRef.current.add(p.id);
-          showToast(`${p.symbol}: trailing stop hit — closing`, "error");
-          handleClosePosition(p.id);
+        if (isShort) {
+          const trough = Math.min(trailPeakRef.current.get(p.id) ?? ltp, ltp);
+          trailPeakRef.current.set(p.id, trough);
+          if (ltp >= trough + p.trail_amount) {
+            triggeredRef.current.add(p.id);
+            showToast(`${p.symbol}: trailing stop hit — closing`, "error");
+            handleClosePosition(p.id);
+          }
+        } else {
+          const peak = Math.max(trailPeakRef.current.get(p.id) ?? ltp, ltp);
+          trailPeakRef.current.set(p.id, peak);
+          if (ltp <= peak - p.trail_amount) {
+            triggeredRef.current.add(p.id);
+            showToast(`${p.symbol}: trailing stop hit — closing`, "error");
+            handleClosePosition(p.id);
+          }
         }
       }
       // Multi-target scale-out: partial-close qty as each level is reached.
       if (p.targets && p.targets.length > 0) {
         p.targets.forEach((t, idx) => {
           const key = `${p.id}:${idx}:${t.price}`;
-          if (targetHitRef.current.has(key) || ltp < t.price) return;
+          const reached = isShort ? ltp <= t.price : ltp >= t.price;
+          if (targetHitRef.current.has(key) || !reached) return;
           targetHitRef.current.add(key);
           const qty = Math.min(t.qty, p.quantity);
           if (qty > 0) {
@@ -911,9 +930,11 @@ export default function PositionsPage() {
       results.forEach((g, i) => {
         if (g) {
           any = true;
-          delta += g.delta * opts[i].quantity;
-          theta += g.theta * opts[i].quantity;
-          vega += g.vega * opts[i].quantity;
+          // A written (short) option carries the opposite Greek sign.
+          const sign = opts[i].direction === "SHORT" ? -1 : 1;
+          delta += sign * g.delta * opts[i].quantity;
+          theta += sign * g.theta * opts[i].quantity;
+          vega += sign * g.vega * opts[i].quantity;
         }
       });
       setNetGreeks(any ? { delta, theta, vega, count: opts.length } : null);

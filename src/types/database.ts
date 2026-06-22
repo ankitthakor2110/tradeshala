@@ -211,9 +211,13 @@ export interface Position {
   strike_price: number | null;
   expiry_date: string | null;
   lot_size: number;
+  // LONG = bought-to-open (default); SHORT = sold/written-to-open.
+  direction: "LONG" | "SHORT";
   quantity: number;
   average_price: number;
   total_invested: number;
+  // Cash held against a short position while open; released on buy-to-close.
+  margin_blocked: number;
   current_price: number | null;
   current_value: number | null;
   pnl: number;
