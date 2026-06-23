@@ -26,7 +26,7 @@ import Modal from "@/components/ui/Modal";
 import { showToast } from "@/components/ui/Toast";
 import { simulateFill, placeOrder } from "@/services/trade-engine.service";
 import { getRecentContracts, type RecentContract } from "@/services/positions.service";
-import { bsPrice, probOfProfit, yearsToExpiry } from "@/utils/options";
+import { bsPrice, probOfProfit, yearsToExpiry, yearsBetween } from "@/utils/options";
 import type { MarketData, OptionChainData, OrderFormData } from "@/types/database";
 
 const INR = "\u20B9";
@@ -103,6 +103,8 @@ export default function TradePage() {
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
   const [fullChain, setFullChain] = useState<OptionChainData[]>([]);
+  // Full chains cached per expiry — powers multi-expiry (calendar) strategies.
+  const [chainsByExpiry, setChainsByExpiry] = useState<Record<string, OptionChainData[]>>({});
   const [chainLoading, setChainLoading] = useState(false);
   const [atmStrike, setAtmStrike] = useState(0);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
@@ -119,6 +121,7 @@ export default function TradePage() {
   const [candleInterval, setCandleInterval] = useState<"1minute" | "30minute">("30minute");
   const [candleSource, setCandleSource] = useState<string>("");
   const [showChart, setShowChart] = useState(true);
+  const [showSkew, setShowSkew] = useState(false);
   const [premiumTicks, setPremiumTicks] = useState<{ t: number; p: number }[]>([]);
 
   const [tradeType, setTradeType] = useState<TradeType>("BUY");
@@ -207,6 +210,7 @@ export default function TradePage() {
         const atm = calcAtm(underlying, selectedSymbol);
         setAtmStrike(atm);
         setFullChain(incoming);
+        if (selectedExpiry) setChainsByExpiry((prev) => ({ ...prev, [selectedExpiry]: incoming }));
         // Smart default: preselect the ATM strike when nothing is chosen yet.
         if (selectedStrike === null) {
           const atmRow = incoming.find((r) => r.strike_price === atm);
@@ -264,8 +268,19 @@ export default function TradePage() {
     setConfirmStep(false); setOrderSuccess(null); setQuote(null);
     setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide(side); setFlashStrike(null);
     setStrikeRange(TRADE_CONFIG.strikeWindow.initial); setMoneyFilter("all");
+    setChainsByExpiry({}); // drop cached chains from the previous underlying
     setModalOpen(true); fetchQuote(symbol, exchange);
   }
+
+  // Lazily fetch + cache the full chain for another expiry (calendar legs).
+  const loadChainFor = useCallback(async (expiry: string) => {
+    if (!selectedSymbol || chainsByExpiry[expiry]) return;
+    try {
+      const r = await fetch(`/api/trade/option-chain?symbol=${encodeURIComponent(selectedSymbol)}&expiry=${encodeURIComponent(expiry)}`);
+      const d = await r.json();
+      setChainsByExpiry((prev) => ({ ...prev, [expiry]: d.chain ?? [] }));
+    } catch { /* ignore */ }
+  }, [selectedSymbol, chainsByExpiry]);
 
   // Re-enter a recently traded contract: open the ticket on the same symbol/side.
   // Strike defaults to ATM (the chain re-resolves live), so this is a fast path
@@ -351,6 +366,24 @@ export default function TradePage() {
     } catch { /* ignore malformed storage */ }
   }, []);
 
+  // Saveable workspace: remember the user's chain columns + chart interval.
+  const workspaceLoaded = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("ts_workspace");
+      if (raw) {
+        const w = JSON.parse(raw) as { visibleCols?: Partial<typeof visibleCols>; candleInterval?: "1minute" | "30minute" };
+        if (w.visibleCols) setVisibleCols((prev) => ({ ...prev, ...w.visibleCols }));
+        if (w.candleInterval) setCandleInterval(w.candleInterval);
+      }
+    } catch { /* ignore */ }
+    workspaceLoaded.current = true;
+  }, []);
+  useEffect(() => {
+    if (!workspaceLoaded.current) return;
+    try { localStorage.setItem("ts_workspace", JSON.stringify({ visibleCols, candleInterval })); } catch { /* quota */ }
+  }, [visibleCols, candleInterval]);
+
   const persistFavorites = useCallback((next: FavOption[]) => {
     setFavorites(next);
     try { localStorage.setItem(FAV_KEY, JSON.stringify(next)); } catch { /* quota */ }
@@ -389,6 +422,58 @@ export default function TradePage() {
     if (!row) return null;
     return selectedSide === "PE" ? row.pe.delta : row.ce.delta;
   }, [chain, selectedStrike, selectedSide]);
+
+  // IV skew: implied vol of CE and PE across the visible strikes.
+  const ivSkew = useMemo(
+    () => chain.map((r) => ({ strike: r.strike_price, ce: r.ce.iv, pe: r.pe.iv })),
+    [chain]
+  );
+
+  // Short-term momentum from the underlying candles (last ~6 bars).
+  const momentum = useMemo(() => {
+    if (candles.length < 6) return null;
+    const last = candles[candles.length - 1].c;
+    const prior = candles[candles.length - 6].c;
+    if (prior <= 0) return null;
+    const pct = ((last - prior) / prior) * 100;
+    return { pct, dir: pct > 0.1 ? "Up" : pct < -0.1 ? "Down" : "Flat" };
+  }, [candles]);
+
+  // Smart entry suggestions: for the active side, pick strikes near target deltas
+  // (conservative/balanced/aggressive) and score each with premium, breakeven and
+  // probability of profit. Needs greeks — degrades to empty when the feed has none.
+  const entrySuggestions = useMemo(() => {
+    const side: "CE" | "PE" = instrumentType === "PE" ? "PE" : "CE";
+    if (instrumentType === "EQ" || chain.length === 0) return [];
+    const hasGreeks = chain.some((r) => Math.abs(side === "CE" ? r.ce.delta : r.pe.delta) > 0.001);
+    if (!hasGreeks) return [];
+    const S0 = quote?.last_price ?? atmStrike;
+    const T = yearsToExpiry(selectedExpiry);
+    const targets = [
+      { label: "Conservative", d: 0.65 },
+      { label: "Balanced", d: 0.5 },
+      { label: "Aggressive", d: 0.3 },
+    ];
+    const seen = new Set<number>();
+    const out: { label: string; strike: number; premium: number; pop: number | null; breakeven: number; delta: number }[] = [];
+    for (const t of targets) {
+      const row = chain.reduce((best, r) => {
+        const d = Math.abs(side === "CE" ? r.ce.delta : r.pe.delta);
+        const bd = Math.abs(side === "CE" ? best.ce.delta : best.pe.delta);
+        return Math.abs(d - t.d) < Math.abs(bd - t.d) ? r : best;
+      });
+      if (seen.has(row.strike_price)) continue;
+      seen.add(row.strike_price);
+      const leg = side === "CE" ? row.ce : row.pe;
+      const premium = leg.ltp;
+      const iv = leg.iv / 100;
+      const breakeven = side === "CE" ? row.strike_price + premium : row.strike_price - premium;
+      const intrinsicAt = (s: number) => (side === "CE" ? Math.max(0, s - row.strike_price) : Math.max(0, row.strike_price - s));
+      const pop = iv > 0 && S0 > 0 ? probOfProfit((s) => intrinsicAt(s) - premium, S0, iv, T) : null;
+      out.push({ label: t.label, strike: row.strike_price, premium, pop, breakeven, delta: leg.delta });
+    }
+    return out;
+  }, [chain, instrumentType, quote, atmStrike, selectedExpiry]);
 
   const numOrNull = (s: string) => {
     const n = parseFloat(s);
@@ -626,6 +711,11 @@ export default function TradePage() {
                       <div className="flex items-center gap-2">
                         <span className="text-[11px] text-gray-400">Price</span>
                         {candleSource === "mock" && <span className="text-[9px] text-gray-600 border border-gray-700 rounded px-1">demo</span>}
+                        {momentum && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${momentum.dir === "Up" ? "bg-green-500/15 text-green-400" : momentum.dir === "Down" ? "bg-red-500/15 text-red-400" : "bg-gray-700/50 text-gray-400"}`} title="Short-term momentum (last ~6 bars)">
+                            {momentum.dir === "Up" ? "▲" : momentum.dir === "Down" ? "▼" : "▬"} {momentum.pct >= 0 ? "+" : ""}{formatPercent(momentum.pct)}
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-1">
                         {(["1minute", "30minute"] as const).map((iv) => (
@@ -726,6 +816,9 @@ export default function TradePage() {
               {tradeMode === "strategy" && (
                 <StrategyBuilder
                   chain={chain}
+                  chainsByExpiry={chainsByExpiry}
+                  expiries={expiries}
+                  loadChainFor={loadChainFor}
                   atmStrike={atmStrike}
                   lotSize={lotSize}
                   symbol={selectedSymbol}
@@ -758,6 +851,27 @@ export default function TradePage() {
                           OI bias <span className="font-semibold">{chainInsights.bias}</span>
                         </span>
                       )}
+                      <button onClick={() => setShowSkew((v) => !v)} className={`px-2 py-0.5 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${showSkew ? "bg-violet-500/20 text-violet-300" : "bg-gray-700/50 text-gray-400 hover:text-white"}`}>IV skew</button>
+                    </div>
+                  )}
+
+                  {/* IV skew — CE vs PE implied vol across strikes */}
+                  {showSkew && ivSkew.length > 1 && (
+                    <div className="bg-gray-800/40 rounded-lg p-2 mb-2">
+                      <div className="h-32 w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ComposedChart data={ivSkew} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                            <XAxis dataKey="strike" stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} />
+                            <YAxis stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} width={30} tickFormatter={(v) => `${v}`} />
+                            <Tooltip formatter={(v, n) => [`${Number(v).toFixed(1)}%`, n === "ce" ? "Call IV" : "Put IV"]} labelFormatter={(l) => `Strike ${Number(l).toLocaleString("en-IN")}`} contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 11 }} />
+                            {atmStrike > 0 && <ReferenceLine x={atmStrike} stroke="#8b5cf6" strokeDasharray="3 3" />}
+                            <Line type="monotone" dataKey="ce" stroke="#22c55e" strokeWidth={1.5} dot={false} />
+                            <Line type="monotone" dataKey="pe" stroke="#ef4444" strokeWidth={1.5} dot={false} />
+                          </ComposedChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <p className="text-[10px] text-gray-600 mt-0.5 px-1"><span className="text-green-400">━</span> Call IV · <span className="text-red-400">━</span> Put IV · ATM dashed</p>
                     </div>
                   )}
                   {/* Controls: moneyness filter (left) + column toggle (right) */}
@@ -954,6 +1068,31 @@ export default function TradePage() {
 
               {/* Ticket pane */}
               <div className="space-y-4 min-w-0">
+              {/* Smart entry suggestions */}
+              {isOption && entrySuggestions.length > 0 && (
+                <div className="bg-gray-800/40 rounded-lg p-3">
+                  <p className="text-xs font-semibold text-gray-300 mb-2">{"💡"} Suggested {instrumentType} strikes</p>
+                  <div className="space-y-1.5">
+                    {entrySuggestions.map((s) => (
+                      <button
+                        key={s.strike}
+                        onClick={() => { const row = chain.find((r) => r.strike_price === s.strike); if (row) handleStrikeSelect(s.strike, instrumentType === "PE" ? row.pe.ltp : row.ce.ltp, instrumentType === "PE" ? "PE" : "CE"); }}
+                        className="w-full flex items-center justify-between gap-2 text-left bg-gray-900 hover:bg-gray-800 rounded-md px-2.5 py-2 cursor-pointer active:scale-[0.99] transition-all duration-200 border border-gray-800 hover:border-violet-500/30"
+                      >
+                        <div className="min-w-0">
+                          <span className="text-xs font-semibold text-white">{s.strike.toLocaleString("en-IN")} {instrumentType}</span>
+                          <span className="text-[10px] text-gray-500 ml-1.5">{s.label} · {"Δ"}{Math.abs(s.delta).toFixed(2)}</span>
+                        </div>
+                        <div className="text-right text-[11px] shrink-0">
+                          <span className="text-gray-300">{INR}{s.premium.toFixed(1)}</span>
+                          {s.pop != null && <span className="text-gray-500 ml-2">POP {formatPercent(s.pop)}</span>}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-gray-600 mt-1.5">Heuristic by delta for a {tradeType === "SELL" ? "write" : "buy"} — not advice.</p>
+                </div>
+              )}
               {/* Selected option */}
               {isOption && selectedStrike && (() => {
                 const mny = moneyness(selectedStrike, atmStrike, selectedSide);
@@ -1259,52 +1398,59 @@ export default function TradePage() {
 }
 
 // ---------------- Strategy Builder ----------------
-interface StrategyLeg { id: number; action: "BUY" | "SELL"; side: "CE" | "PE"; strike: number; lots: number }
+interface StrategyLeg { id: number; action: "BUY" | "SELL"; side: "CE" | "PE"; strike: number; lots: number; expiry: string }
 let legIdCounter = 0;
 
-function legPremium(leg: StrategyLeg, chain: OptionChainData[]): number {
-  const row = chain.find((r) => r.strike_price === leg.strike);
+// Resolves the chain for a leg's own expiry (calendar spreads span expiries).
+type ChainFor = (expiry: string) => OptionChainData[];
+
+function legPremium(leg: StrategyLeg, chainFor: ChainFor): number {
+  const row = chainFor(leg.expiry).find((r) => r.strike_price === leg.strike);
   if (!row) return 0;
   return leg.side === "CE" ? row.ce.ltp : row.pe.ltp;
 }
 
-function legIv(leg: StrategyLeg, chain: OptionChainData[]): number {
-  const row = chain.find((r) => r.strike_price === leg.strike);
+function legIv(leg: StrategyLeg, chainFor: ChainFor): number {
+  const row = chainFor(leg.expiry).find((r) => r.strike_price === leg.strike);
   if (!row) return 0;
   return (leg.side === "CE" ? row.ce.iv : row.pe.iv) / 100;
 }
 
-// Combined strategy P&L at expiry across the underlying range, plus the BS
-// "today" (T+0) curve and probability of profit. `expiry`/`underlying` drive the
-// time-value model; without them the T+0 curve collapses onto expiry.
-function strategyMetrics(
-  legs: StrategyLeg[],
-  chain: OptionChainData[],
-  lotSize: number,
-  expiry: string | null,
-  underlying: number
-) {
+// Combined strategy P&L across the underlying range, plus the BS "today" (T+0)
+// curve and probability of profit. The "expiry" curve is evaluated at the
+// NEAREST leg's expiry: legs expiring then settle to intrinsic; longer-dated
+// legs (calendar/diagonal) still carry time value, priced via Black-Scholes for
+// the time remaining. `isMultiExpiry` flags that to the caller.
+function strategyMetrics(legs: StrategyLeg[], chainFor: ChainFor, lotSize: number, underlying: number) {
   if (legs.length === 0) return null;
   const strikes = legs.map((l) => l.strike);
   const lo = Math.min(...strikes) * 0.8;
   const hi = Math.max(...strikes) * 1.2;
   const steps = 60;
-  const T = yearsToExpiry(expiry);
+  const nearExpiry = legs.map((l) => l.expiry).sort()[0];
+  const isMultiExpiry = legs.some((l) => l.expiry !== nearExpiry);
 
+  // Value a leg at the near expiry: intrinsic if it's also expiring, else BS for
+  // the time between near and its own expiry.
+  const valueAtNear = (leg: StrategyLeg, s: number) => {
+    const tRem = leg.expiry === nearExpiry ? 0 : yearsBetween(nearExpiry, leg.expiry);
+    if (tRem <= 0) return leg.side === "CE" ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
+    return bsPrice(leg.side, s, leg.strike, tRem, legIv(leg, chainFor));
+  };
   const expiryPnlAt = (s: number) => {
     let pnl = 0;
     for (const leg of legs) {
-      const prem = legPremium(leg, chain);
-      const intrinsic = leg.side === "CE" ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
-      pnl += (leg.action === "BUY" ? intrinsic - prem : prem - intrinsic) * leg.lots * lotSize;
+      const prem = legPremium(leg, chainFor);
+      const val = valueAtNear(leg, s);
+      pnl += (leg.action === "BUY" ? val - prem : prem - val) * leg.lots * lotSize;
     }
     return pnl;
   };
   const t0PnlAt = (s: number) => {
     let pnl = 0;
     for (const leg of legs) {
-      const prem = legPremium(leg, chain);
-      const val = bsPrice(leg.side, s, leg.strike, T, legIv(leg, chain));
+      const prem = legPremium(leg, chainFor);
+      const val = bsPrice(leg.side, s, leg.strike, yearsToExpiry(leg.expiry), legIv(leg, chainFor));
       pnl += (leg.action === "BUY" ? val - prem : prem - val) * leg.lots * lotSize;
     }
     return pnl;
@@ -1317,7 +1463,7 @@ function strategyMetrics(
   }
   let netPremium = 0;
   for (const leg of legs) {
-    netPremium += (leg.action === "BUY" ? -legPremium(leg, chain) : legPremium(leg, chain)) * leg.lots * lotSize;
+    netPremium += (leg.action === "BUY" ? -legPremium(leg, chainFor) : legPremium(leg, chainFor)) * leg.lots * lotSize;
   }
   const n = points.length;
   const rightSlope = points[n - 1].pnl - points[n - 2].pnl;
@@ -1333,10 +1479,10 @@ function strategyMetrics(
       breakevens.push(Math.round(a.s + (b.s - a.s) * t));
     }
   }
-  // POP from the ATM leg's IV as the underlying's vol proxy.
-  const atmIv = legIv(legs[0], chain) || 0;
-  const pop = atmIv > 0 && underlying > 0 ? probOfProfit(expiryPnlAt, underlying, atmIv, T) : null;
-  return { points, netPremium, maxProfit, maxLoss, breakevens, pop };
+  // POP at the near expiry, using the ATM leg's IV as the underlying vol proxy.
+  const atmIv = legIv(legs[0], chainFor) || 0;
+  const pop = atmIv > 0 && underlying > 0 ? probOfProfit(expiryPnlAt, underlying, atmIv, yearsToExpiry(nearExpiry)) : null;
+  return { points, netPremium, maxProfit, maxLoss, breakevens, pop, isMultiExpiry, nearExpiry };
 }
 
 const STRATEGY_TEMPLATES = [
@@ -1346,29 +1492,37 @@ const STRATEGY_TEMPLATES = [
   { key: "bearput", label: "Bear Put" },
   { key: "ironcondor", label: "Iron Condor" },
   { key: "butterfly", label: "Call Butterfly" },
+  { key: "calendar", label: "Calendar (CE)" }, // needs a 2nd expiry
 ];
 
-function buildTemplate(key: string, atm: number, chain: OptionChainData[]): StrategyLeg[] {
+// `near` is the primary expiry; `far` (optional) is the next one, used by the
+// calendar template's long leg. All other templates are single-expiry (near).
+function buildTemplate(key: string, atm: number, chain: OptionChainData[], near: string, far: string | null): StrategyLeg[] {
   const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
   const idx = strikes.indexOf(atm);
   if (idx < 0) return [];
   const at = (off: number): number | undefined => strikes[idx + off];
-  const L = (action: "BUY" | "SELL", side: "CE" | "PE", strike: number | undefined, lots = 1): StrategyLeg | null =>
-    strike == null ? null : { id: (legIdCounter += 1), action, side, strike, lots };
+  const L = (action: "BUY" | "SELL", side: "CE" | "PE", strike: number | undefined, exp: string, lots = 1): StrategyLeg | null =>
+    strike == null ? null : { id: (legIdCounter += 1), action, side, strike, lots, expiry: exp };
   let legs: (StrategyLeg | null)[] = [];
   switch (key) {
-    case "straddle": legs = [L("BUY", "CE", at(0)), L("BUY", "PE", at(0))]; break;
-    case "strangle": legs = [L("BUY", "CE", at(1)), L("BUY", "PE", at(-1))]; break;
-    case "bullcall": legs = [L("BUY", "CE", at(0)), L("SELL", "CE", at(1))]; break;
-    case "bearput": legs = [L("BUY", "PE", at(0)), L("SELL", "PE", at(-1))]; break;
-    case "ironcondor": legs = [L("SELL", "PE", at(-1)), L("BUY", "PE", at(-2)), L("SELL", "CE", at(1)), L("BUY", "CE", at(2))]; break;
-    case "butterfly": legs = [L("BUY", "CE", at(-1)), L("SELL", "CE", at(0)), L("SELL", "CE", at(0)), L("BUY", "CE", at(1))]; break;
+    case "straddle": legs = [L("BUY", "CE", at(0), near), L("BUY", "PE", at(0), near)]; break;
+    case "strangle": legs = [L("BUY", "CE", at(1), near), L("BUY", "PE", at(-1), near)]; break;
+    case "bullcall": legs = [L("BUY", "CE", at(0), near), L("SELL", "CE", at(1), near)]; break;
+    case "bearput": legs = [L("BUY", "PE", at(0), near), L("SELL", "PE", at(-1), near)]; break;
+    case "ironcondor": legs = [L("SELL", "PE", at(-1), near), L("BUY", "PE", at(-2), near), L("SELL", "CE", at(1), near), L("BUY", "CE", at(2), near)]; break;
+    case "butterfly": legs = [L("BUY", "CE", at(-1), near), L("SELL", "CE", at(0), near), L("SELL", "CE", at(0), near), L("BUY", "CE", at(1), near)]; break;
+    // Calendar: sell the near ATM call, buy the same strike in the next expiry.
+    case "calendar": legs = far ? [L("SELL", "CE", at(0), near), L("BUY", "CE", at(0), far)] : []; break;
   }
   return legs.filter((l): l is StrategyLeg => l !== null);
 }
 
 function StrategyBuilder({
   chain,
+  chainsByExpiry,
+  expiries,
+  loadChainFor,
   atmStrike,
   lotSize,
   symbol,
@@ -1378,6 +1532,9 @@ function StrategyBuilder({
   onPlaced,
 }: {
   chain: OptionChainData[];
+  chainsByExpiry: Record<string, OptionChainData[]>;
+  expiries: string[];
+  loadChainFor: (expiry: string) => void;
   atmStrike: number;
   lotSize: number;
   symbol: string;
@@ -1388,23 +1545,35 @@ function StrategyBuilder({
 }) {
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
   const [placingStrategy, setPlacingStrategy] = useState(false);
-  const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
-  const metrics = strategyMetrics(legs, chain, lotSize, expiry, atmStrike);
+  // Resolve each leg's expiry to its own (cached) chain; fall back to the
+  // primary chain for the selected expiry.
+  const chainFor = useCallback(
+    (exp: string): OptionChainData[] => chainsByExpiry[exp] ?? (exp === expiry ? chain : []),
+    [chainsByExpiry, expiry, chain]
+  );
+  const metrics = strategyMetrics(legs, chainFor, lotSize, atmStrike);
   const hasShort = legs.some((l) => l.action === "SELL");
+  const farExpiry = expiries.find((e) => e !== expiry) ?? null;
+
+  // Ensure a chain is loaded whenever a leg references an expiry we haven't cached.
+  useEffect(() => {
+    for (const l of legs) if (l.expiry && !chainsByExpiry[l.expiry]) loadChainFor(l.expiry);
+  }, [legs, chainsByExpiry, loadChainFor]);
 
   async function placeStrategy() {
-    if (!userId || legs.length === 0 || !expiry) return;
+    if (!userId || legs.length === 0) return;
     setPlacingStrategy(true);
     let ok = 0;
     let fail = 0;
     for (const leg of legs) {
+      if (!leg.expiry) { fail += 1; continue; }
       const res = await placeOrder(userId, {
         symbol,
         exchange,
         instrument_type: leg.side,
         option_type: leg.side,
         strike_price: leg.strike,
-        expiry_date: expiry,
+        expiry_date: leg.expiry,
         lot_size: lotSize,
         order_type: "MARKET",
         trade_type: leg.action,
@@ -1423,17 +1592,18 @@ function StrategyBuilder({
   const fmtMoney = (v: number) =>
     Math.abs(v) === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 
-  if (chain.length === 0) {
+  if (chain.length === 0 || !expiry) {
     return <p className="text-sm text-gray-500 text-center py-6">Select an expiry to load strikes.</p>;
   }
+  const multiExpiry = expiries.length > 1;
 
   return (
     <div className="space-y-3">
       <div>
         <p className="text-xs text-gray-400 mb-1.5">Templates</p>
         <div className="flex flex-wrap gap-1.5">
-          {STRATEGY_TEMPLATES.map((t) => (
-            <button key={t.key} onClick={() => setLegs(buildTemplate(t.key, atmStrike, chain))}
+          {STRATEGY_TEMPLATES.filter((t) => t.key !== "calendar" || multiExpiry).map((t) => (
+            <button key={t.key} onClick={() => setLegs(buildTemplate(t.key, atmStrike, chain, expiry, farExpiry))}
               className="text-[11px] px-2 py-1 rounded-md bg-gray-800 text-gray-300 hover:bg-violet-500/20 hover:text-violet-300 cursor-pointer active:scale-95 transition-all duration-200">
               {t.label}
             </button>
@@ -1442,23 +1612,32 @@ function StrategyBuilder({
       </div>
 
       <div className="space-y-1.5">
-        {legs.map((leg) => (
-          <div key={leg.id} className="flex items-center gap-1.5 text-xs">
+        {legs.map((leg) => {
+          const legStrikes = chainFor(leg.expiry).map((r) => r.strike_price).sort((a, b) => a - b);
+          return (
+          <div key={leg.id} className="flex items-center gap-1.5 text-xs flex-wrap">
             <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, action: l.action === "BUY" ? "SELL" : "BUY" } : l)))}
               className={`px-2 py-1 rounded-md font-semibold w-12 cursor-pointer ${leg.action === "BUY" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>{leg.action}</button>
             <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, side: l.side === "CE" ? "PE" : "CE" } : l)))}
               className={`px-2 py-1 rounded-md font-semibold w-10 cursor-pointer ${leg.side === "CE" ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>{leg.side}</button>
             <select value={leg.strike} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, strike: Number(e.target.value) } : l)))}
               className="bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white cursor-pointer">
-              {strikes.map((s) => <option key={s} value={s}>{s.toLocaleString("en-IN")}</option>)}
+              {legStrikes.map((s) => <option key={s} value={s}>{s.toLocaleString("en-IN")}</option>)}
             </select>
+            {multiExpiry && (
+              <select value={leg.expiry} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, expiry: e.target.value } : l)))}
+                className="bg-gray-800 border border-gray-700 rounded-md px-1.5 py-1 text-white cursor-pointer" title="Leg expiry (calendar/diagonal)">
+                {expiries.map((e) => <option key={e} value={e}>{fmtExpiryShort(e)}</option>)}
+              </select>
+            )}
             <input type="number" min={1} value={leg.lots} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, lots: Math.max(1, parseInt(e.target.value, 10) || 1) } : l)))}
               className="w-14 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white" />
-            <span className="text-gray-500">@{INR}{legPremium(leg, chain).toFixed(1)}</span>
+            <span className="text-gray-500">@{INR}{legPremium(leg, chainFor).toFixed(1)}</span>
             <button onClick={() => setLegs((ls) => ls.filter((l) => l.id !== leg.id))} className="text-red-400 hover:text-red-300 cursor-pointer ml-auto px-1" aria-label="Remove leg">✕</button>
           </div>
-        ))}
-        <button onClick={() => setLegs((ls) => [...ls, { id: (legIdCounter += 1), action: "BUY", side: "CE", strike: atmStrike, lots: 1 }])}
+          );
+        })}
+        <button onClick={() => setLegs((ls) => [...ls, { id: (legIdCounter += 1), action: "BUY", side: "CE", strike: atmStrike, lots: 1, expiry: expiry }])}
           className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer">+ Add leg</button>
       </div>
 
@@ -1484,7 +1663,9 @@ function StrategyBuilder({
               </ComposedChart>
             </ResponsiveContainer>
           </div>
-          <p className="text-[10px] text-gray-600 mt-1"><span className="text-violet-400">━</span> At expiry · <span className="text-amber-500">┄</span> Today (T+0)</p>
+          <p className="text-[10px] text-gray-600 mt-1">
+            <span className="text-violet-400">━</span> {metrics.isMultiExpiry && metrics.nearExpiry ? `At ${fmtExpiryShort(metrics.nearExpiry)} (near leg; longer legs BS-valued)` : "At expiry"} · <span className="text-amber-500">┄</span> Today (T+0)
+          </p>
           <button
             onClick={placeStrategy}
             disabled={placingStrategy || !userId}

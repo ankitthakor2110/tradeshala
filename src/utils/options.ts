@@ -25,6 +25,17 @@ export function yearsToExpiry(expiry: string | null): number {
 }
 
 /**
+ * Years between two expiry dates (date-only ISO), floored at 0. Used to value a
+ * longer-dated leg of a calendar spread at the nearer leg's expiry.
+ */
+export function yearsBetween(fromExpiry: string | null, toExpiry: string | null): number {
+  if (!fromExpiry || !toExpiry) return 0;
+  const a = new Date(`${fromExpiry}T15:30:00`).getTime();
+  const b = new Date(`${toExpiry}T15:30:00`).getTime();
+  return Math.max((b - a) / (365 * 24 * 60 * 60 * 1000), 0);
+}
+
+/**
  * Black–Scholes premium for a European option. `iv` is a fraction. At/near
  * expiry (T→0 or iv→0) it collapses to intrinsic value.
  */
