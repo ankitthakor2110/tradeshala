@@ -6,66 +6,87 @@ import { getCurrentUser } from "@/services/auth.service";
 import { canReconnectUpstox } from "@/config/admin";
 
 /**
- * Shows a "live data stale — reconnect Upstox" banner with a one-click reconnect
- * button, but ONLY for the single user who manages the Upstox connection
- * (UPSTOX_RECONNECT_EMAIL). The button hits /api/broker/reconnect, which sends
- * the user straight to the Upstox login and stores the fresh token.
+ * Surfaces the shared Upstox session state on the dashboard.
+ *
+ * Live data is powered by ONE shared Upstox login. When that session is missing
+ * or expired:
+ *   - the managing user (UPSTOX_RECONNECT_EMAIL) sees a one-click "Reconnect
+ *     Upstox" button (hits /api/broker/reconnect → Upstox login → stores the
+ *     fresh shared token), and
+ *   - everyone else sees a quiet "waiting for authorization" note (it clears
+ *     itself once the managing user reconnects).
+ *
+ * Status comes from the cheap /api/broker/upstox/status endpoint (DB-only, no
+ * live Upstox call), polled so the banner clears automatically after reconnect.
  */
 export default function UpstoxReconnectBanner() {
   const mounted = useIsMounted();
-  const [allowed, setAllowed] = useState(false);
-  const [stale, setStale] = useState(false);
+  const [manages, setManages] = useState(false);
+  // Assume connected until we know otherwise, so there's no banner flash on load.
+  const [connected, setConnected] = useState(true);
 
   useEffect(() => {
     let active = true;
 
-    async function checkStale() {
+    async function fetchConnected(): Promise<boolean> {
       try {
-        const res = await fetch("/api/market-data/health");
-        const h = await res.json();
-        return h?.upstox?.status === "error" || h?.upstox?.tokenExpired === true;
+        const res = await fetch("/api/broker/upstox/status");
+        if (!res.ok) return true; // don't nag on auth/transient errors
+        const s = await res.json();
+        return !!s.connected;
       } catch {
-        return false;
+        return true;
       }
     }
 
     (async () => {
       const user = await getCurrentUser();
-      if (!active || !canReconnectUpstox(user?.email)) return;
-      setAllowed(true);
-      setStale(await checkStale());
+      if (!active) return;
+      setManages(canReconnectUpstox(user?.email));
+      setConnected(await fetchConnected());
     })();
 
     // Re-check periodically so the banner clears itself after a reconnect.
     const interval = setInterval(async () => {
-      if (!allowed) return;
-      const s = await checkStale();
-      if (active) setStale(s);
+      const c = await fetchConnected();
+      if (active) setConnected(c);
     }, 60000);
 
     return () => {
       active = false;
       clearInterval(interval);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!mounted || !allowed || !stale) return null;
+  if (!mounted || connected) return null;
 
-  return (
-    <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-      <div className="flex items-center gap-2">
-        <span className="h-2 w-2 rounded-full bg-amber-400" />
-        <p className="text-sm text-amber-200">
-          Live market data is stale — your Upstox session has expired.
-        </p>
+  // Managing user — actionable reconnect.
+  if (manages) {
+    return (
+      <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-amber-400" />
+          <p className="text-sm text-amber-200">
+            Live market data is paused — today&apos;s Upstox session needs authorizing.
+          </p>
+        </div>
+        <a
+          href="/api/broker/reconnect"
+          className="shrink-0 text-center text-xs font-semibold px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-gray-950 cursor-pointer transition-all duration-200 active:scale-95"
+        >
+          Reconnect Upstox
+        </a>
       </div>
-      <a
-        href="/api/broker/reconnect"
-        className="shrink-0 text-center text-xs font-semibold px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-gray-950 cursor-pointer transition-all duration-200 active:scale-95"
-      >
-        Reconnect Upstox
-      </a>
+    );
+  }
+
+  // Everyone else — passive, self-clearing note.
+  return (
+    <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+      <span className="h-2 w-2 rounded-full bg-amber-400/70" />
+      <p className="text-sm text-amber-200/80">
+        Live market data is paused — waiting for today&apos;s broker authorization. It&apos;ll resume automatically.
+      </p>
     </div>
   );
 }

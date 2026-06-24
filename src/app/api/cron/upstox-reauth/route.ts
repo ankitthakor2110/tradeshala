@@ -1,10 +1,13 @@
 import { NextRequest } from "next/server";
+import { getSharedUpstoxStatus } from "@/lib/market-data/upstox";
 
 /**
  * Daily Upstox re-auth reminder. Vercel Cron hits this each morning (~9:00 IST)
  * and emails a one-click "Reconnect Upstox" link. Upstox tokens expire daily
  * and have no refresh token, so a quick manual login is required; this makes it
- * a single click straight from the inbox.
+ * a single click straight from the inbox. The clicked login stores a fresh token
+ * on the managing account's row, which the shared-token resolver then serves to
+ * the cron writer and every user (see lib/market-data/upstox.ts).
  *
  * Email is sent via Resend's REST API (no SDK dependency). Required env:
  *   CRON_SECRET, RESEND_API_KEY, EMAIL_FROM, EMAIL_TO, NEXT_PUBLIC_APP_URL
@@ -16,6 +19,12 @@ export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Skip the nag if a fresh shared token already exists (e.g. reconnected early).
+  const status = await getSharedUpstoxStatus().catch(() => ({ connected: false, expiresAt: null }));
+  if (status.connected) {
+    return Response.json({ ok: true, skipped: true, reason: "Upstox token still valid", expiresAt: status.expiresAt });
   }
 
   const apiKey = process.env.RESEND_API_KEY;
