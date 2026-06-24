@@ -72,6 +72,55 @@ export async function getRecentOrders(
   }
 }
 
+export interface RecentContract {
+  symbol: string;
+  exchange: string;
+  instrument_type: "EQ" | "CE" | "PE" | "FUT";
+  option_type: "CE" | "PE" | null;
+  strike_price: number | null;
+  expiry_date: string | null;
+  company_name: string | null;
+  executed_at: string | null;
+}
+
+/**
+ * Most recently executed *contracts* (deduped) across all symbols, for the
+ * "recent trades" quick re-entry strip on the trade page. Distinct on the
+ * contract key (symbol + strike + expiry + side), newest first.
+ */
+export async function getRecentContracts(
+  userId: string,
+  limit = 6
+): Promise<RecentContract[]> {
+  try {
+    const supabase = createClient() as unknown as SupabaseClient;
+    const { data, error } = await supabase
+      .from("orders")
+      .select(
+        "symbol, exchange, instrument_type, option_type, strike_price, expiry_date, company_name, executed_at"
+      )
+      .eq("user_id", userId)
+      .eq("status", "EXECUTED")
+      .order("executed_at", { ascending: false })
+      .limit(60)
+      .returns<RecentContract[]>();
+    if (error || !data) return [];
+
+    const seen = new Set<string>();
+    const out: RecentContract[] = [];
+    for (const o of data) {
+      const key = `${o.symbol}|${o.instrument_type}|${o.strike_price ?? ""}|${o.expiry_date ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(o);
+      if (out.length >= limit) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /** Persists SL / Target / Alert levels on a position (null clears a level). */
 export async function setPositionRisk(
   positionId: string,
@@ -81,6 +130,23 @@ export async function setPositionRisk(
     alert_price?: number | null;
     trail_amount?: number | null;
   }
+): Promise<boolean> {
+  try {
+    const supabase = createClient();
+    const { error } = await supabase
+      .from("positions")
+      .update(fields as never)
+      .eq("id", positionId);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/** Persists journal notes + tags on a position (trade journal page). */
+export async function setPositionJournal(
+  positionId: string,
+  fields: { notes?: string | null; tags?: string[] | null }
 ): Promise<boolean> {
   try {
     const supabase = createClient();
@@ -122,10 +188,11 @@ function isToday(iso: string | null): boolean {
   );
 }
 
-/** Unrealized P&L for an open position from its current value vs. invested. */
+/** Unrealized P&L for an open position — long gains as price rises, short as it falls. */
 function unrealized(p: Position): number {
-  const current = p.current_value ?? p.quantity * (p.current_price ?? p.average_price);
-  return current - p.total_invested;
+  const ltp = p.current_price ?? p.average_price;
+  const perUnit = p.direction === "SHORT" ? p.average_price - ltp : ltp - p.average_price;
+  return perUnit * p.quantity;
 }
 
 /**
@@ -142,7 +209,9 @@ export function summarizePositions(
     (s, p) => s + (p.current_value ?? p.quantity * (p.current_price ?? p.average_price)),
     0
   );
-  const openUnrealizedPnL = currentValue - totalInvested;
+  // Sum per-position P&L (direction-aware) rather than currentValue - invested,
+  // which only holds for longs.
+  const openUnrealizedPnL = open.reduce((s, p) => s + unrealized(p), 0);
   const openUnrealizedPnLPercent =
     totalInvested > 0 ? (openUnrealizedPnL / totalInvested) * 100 : 0;
 

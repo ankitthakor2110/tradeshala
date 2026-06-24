@@ -24,11 +24,13 @@ export interface PositionView
 function toView(p: Position): PositionView {
   const ltp = p.current_price ?? p.average_price;
   const cv = p.current_value ?? p.quantity * ltp;
+  const dirMul = p.direction === "SHORT" ? -1 : 1;
   return {
     ...p,
     current_price: ltp,
     current_value: cv,
-    unrealized_pnl: p.status === "OPEN" ? cv - p.total_invested : p.unrealized_pnl,
+    unrealized_pnl:
+      p.status === "OPEN" ? dirMul * (ltp - p.average_price) * p.quantity : p.unrealized_pnl,
     realized_pnl: p.realized_pnl || p.pnl,
   };
 }
@@ -91,15 +93,16 @@ export function usePositions(): {
         if (!q) return v;
         const ltp = q.ltp;
         const cv = p.quantity * ltp;
-        const unreal = cv - p.total_invested;
+        const dirMul = p.direction === "SHORT" ? -1 : 1;
+        const unreal = dirMul * (ltp - p.average_price) * p.quantity;
         return {
           ...v,
           current_price: ltp,
           current_value: cv,
           unrealized_pnl: unreal,
           pnl_percent: p.total_invested > 0 ? (unreal / p.total_invested) * 100 : 0,
-          // Day P&L from the tick's day change (per share) × quantity.
-          day_pnl: q.change * p.quantity,
+          // Day P&L from the tick's day change (per share) × quantity; shorts gain when price falls.
+          day_pnl: dirMul * q.change * p.quantity,
         };
       }),
     [rawOpen, quotes]

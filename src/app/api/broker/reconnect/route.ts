@@ -28,12 +28,14 @@ export async function GET(request: NextRequest) {
     .select("api_key")
     .eq("user_id", user.id)
     .eq("broker_id", "upstox")
-    .single<{ api_key: string | null }>();
+    .maybeSingle<{ api_key: string | null }>();
 
+  // No API key on file yet — reconnect has nothing to authorize with. Send the
+  // user to the broker page with a guiding (not alarming) prompt to set it up.
   if (!connection?.api_key) {
     return Response.redirect(
-      `${APP_URL}/dashboard/broker?status=error&message=${encodeURIComponent(
-        "Save your Upstox API key before reconnecting."
+      `${APP_URL}/dashboard/broker?status=setup&message=${encodeURIComponent(
+        "Add your Upstox API Key below, then use Reconnect to refresh the session."
       )}`
     );
   }

@@ -166,6 +166,8 @@ async function fetchUpstox(symbol: string, expiry: string): Promise<ChainRespons
 
 // --- Mock generator ---
 function r2(n: number) { return Math.round(n * 100) / 100; }
+// Gamma is ~0.001–0.005, so 2-decimal rounding would flatten it to 0. Keep 4dp.
+function r4(n: number) { return Math.round(n * 10000) / 10000; }
 
 function generateMockChain(symbol: string, expiry: string): ChainResponse {
   const underlyingPrices: Record<string, number> = { NIFTY: 24050, BANKNIFTY: 55900, FINNIFTY: 23800, SENSEX: 79500 };
@@ -219,13 +221,13 @@ function generateMockChain(symbol: string, expiry: string): ChainResponse {
         ltp: cePrice, change: r2(cePrice - cePrevClose), changePercent: r2(cePrevClose ? ((cePrice - cePrevClose) / cePrevClose) * 100 : 0),
         bid: r2(cePrice - ceSpread), ask: r2(cePrice + ceSpread), bidAskSpread: r2(ceSpread * 2),
         oi: ceOi, oiChange: ceOiChg, oiChangePercent: r2(ceOi ? (ceOiChg / ceOi) * 100 : 0),
-        volume: ceVol, iv: ceIv, delta: ceDelta, gamma: r2(0.002 + Math.random() * 0.003), theta: ceTheta, vega: r2(3 + Math.random() * 5),
+        volume: ceVol, iv: ceIv, delta: ceDelta, gamma: r4(0.002 + Math.random() * 0.003), theta: ceTheta, vega: r2(3 + Math.random() * 5),
       },
       pe: {
         ltp: pePrice, change: r2(pePrice - pePrevClose), changePercent: r2(pePrevClose ? ((pePrice - pePrevClose) / pePrevClose) * 100 : 0),
         bid: r2(pePrice - peSpread), ask: r2(pePrice + peSpread), bidAskSpread: r2(peSpread * 2),
         oi: peOi, oiChange: peOiChg, oiChangePercent: r2(peOi ? (peOiChg / peOi) * 100 : 0),
-        volume: peVol, iv: peIv, delta: peDelta, gamma: r2(0.002 + Math.random() * 0.003), theta: peTheta, vega: r2(3 + Math.random() * 5),
+        volume: peVol, iv: peIv, delta: peDelta, gamma: r4(0.002 + Math.random() * 0.003), theta: peTheta, vega: r2(3 + Math.random() * 5),
       },
       pcr: r2(ceOi > 0 ? peOi / ceOi : 0),
       totalCeOI: 0,

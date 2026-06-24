@@ -4,13 +4,15 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { getCurrentUser } from "@/services/auth.service";
-import { searchStocks, getStockQuote, getIndicesData } from "@/services/market-data.service";
+import { searchStocks, getStockQuote, getIndicesData, getCandles, getOptionLtp, type Candle } from "@/services/market-data.service";
 import { TRADE_CONFIG } from "@/config/trade";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { getPnLColor } from "@/utils/colors";
 import { formatOI, formatPercent } from "@/utils/format";
 import {
   ComposedChart,
+  AreaChart,
+  Area,
   Line,
   XAxis,
   YAxis,
@@ -23,6 +25,8 @@ import LiveBadge from "@/components/ui/LiveBadge";
 import Modal from "@/components/ui/Modal";
 import { showToast } from "@/components/ui/Toast";
 import { simulateFill, placeOrder } from "@/services/trade-engine.service";
+import { getRecentContracts, type RecentContract } from "@/services/positions.service";
+import { bsPrice, probOfProfit, yearsToExpiry, yearsBetween } from "@/utils/options";
 import type { MarketData, OptionChainData, OrderFormData } from "@/types/database";
 
 const INR = "\u20B9";
@@ -34,36 +38,38 @@ function calcAtm(price: number, symbol: string): number {
   return Math.round(price / gap) * gap;
 }
 
-// P&L at expiry for a single option leg across a range of underlying prices.
-function optionPayoff(
-  side: "CE" | "PE",
-  tradeType: "BUY" | "SELL",
-  strike: number,
-  premium: number,
-  totalQty: number
-): { s: number; pnl: number }[] {
-  if (!strike || totalQty <= 0) return [];
-  const lo = strike * 0.9;
-  const hi = strike * 1.1;
-  const steps = 25;
-  const pts: { s: number; pnl: number }[] = [];
-  for (let i = 0; i < steps; i++) {
-    const s = lo + ((hi - lo) * i) / (steps - 1);
-    const intrinsic = side === "CE" ? Math.max(0, s - strike) : Math.max(0, strike - s);
-    const longPnl = (intrinsic - premium) * totalQty;
-    pts.push({ s: Math.round(s), pnl: Math.round(tradeType === "BUY" ? longPnl : -longPnl) });
-  }
-  return pts;
-}
-
-function filterStrikes(chain: OptionChainData[], atm: number, symbol: string): OptionChainData[] {
+function filterStrikes(chain: OptionChainData[], atm: number, symbol: string, range: number): OptionChainData[] {
   const gap = STRIKE_GAP[symbol] ?? 5;
   const strikes: number[] = [];
-  for (let i = -5; i <= 5; i++) strikes.push(atm + i * gap);
+  for (let i = -range; i <= range; i++) strikes.push(atm + i * gap);
   return chain.filter((r) => strikes.includes(r.strike_price)).sort((a, b) => a.strike_price - b.strike_price);
 }
 
+// Moneyness of a strike for a given option side, relative to the ATM strike.
+// CE is ITM below ATM (strike < spot); PE is ITM above ATM.
+function moneyness(strike: number, atm: number, side: "CE" | "PE"): "ITM" | "ATM" | "OTM" {
+  if (strike === atm) return "ATM";
+  if (side === "CE") return strike < atm ? "ITM" : "OTM";
+  return strike > atm ? "ITM" : "OTM";
+}
+
+// Indian-market OI build-up read from price move × OI move on a single leg.
+// Returns null when the provider didn't supply OI-change (real feeds leave it 0).
+function classifyBuildup(changePercent: number, oiChange: number): keyof typeof TRADE_CONFIG.buildup | null {
+  if (!oiChange || !changePercent) return null;
+  const priceUp = changePercent > 0;
+  const oiUp = oiChange > 0;
+  if (priceUp && oiUp) return "longBuildup";
+  if (!priceUp && oiUp) return "shortBuildup";
+  if (priceUp && !oiUp) return "shortCovering";
+  return "longUnwinding";
+}
+
 interface SearchResult { symbol: string; company_name: string; exchange: string }
+interface FavOption { symbol: string; exchange: string; name: string; side: "CE" | "PE"; strike: number; expiry: string | null }
+const FAV_KEY = "ts_fav_options";
+const favKey = (f: { symbol: string; side: "CE" | "PE"; strike: number; expiry: string | null }) =>
+  `${f.symbol}|${f.side}|${f.strike}|${f.expiry ?? ""}`;
 type InstrumentType = "EQ" | "CE" | "PE";
 type TradeType = "BUY" | "SELL";
 type OrderType = "MARKET" | "LIMIT" | "SL" | "SL-M";
@@ -96,15 +102,27 @@ export default function TradePage() {
   const [instrumentType, setInstrumentType] = useState<InstrumentType>("CE");
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
-  const [chain, setChain] = useState<OptionChainData[]>([]);
+  const [fullChain, setFullChain] = useState<OptionChainData[]>([]);
+  // Full chains cached per expiry — powers multi-expiry (calendar) strategies.
+  const [chainsByExpiry, setChainsByExpiry] = useState<Record<string, OptionChainData[]>>({});
   const [chainLoading, setChainLoading] = useState(false);
   const [atmStrike, setAtmStrike] = useState(0);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
   const [selectedOptionLtp, setSelectedOptionLtp] = useState<number | null>(null);
   const [selectedSide, setSelectedSide] = useState<"CE" | "PE">("CE");
   const [flashStrike, setFlashStrike] = useState<number | null>(null);
-  const [visibleCols, setVisibleCols] = useState({ oi: true, oiChg: false, vol: false, iv: true, delta: false, bidAsk: false });
+  const [visibleCols, setVisibleCols] = useState({ oi: true, oiChg: false, vol: false, iv: true, delta: false, gamma: false, theta: false, vega: false, bidAsk: false });
   const [showColMenu, setShowColMenu] = useState(false);
+  const [strikeRange, setStrikeRange] = useState<number>(TRADE_CONFIG.strikeWindow.initial);
+  const [moneyFilter, setMoneyFilter] = useState<"all" | "ITM" | "OTM">("all");
+  const [recentContracts, setRecentContracts] = useState<RecentContract[]>([]);
+  const [favorites, setFavorites] = useState<FavOption[]>([]);
+  const [candles, setCandles] = useState<Candle[]>([]);
+  const [candleInterval, setCandleInterval] = useState<"1minute" | "30minute">("30minute");
+  const [candleSource, setCandleSource] = useState<string>("");
+  const [showChart, setShowChart] = useState(true);
+  const [showSkew, setShowSkew] = useState(false);
+  const [premiumTicks, setPremiumTicks] = useState<{ t: number; p: number }[]>([]);
 
   const [tradeType, setTradeType] = useState<TradeType>("BUY");
   const [orderType, setOrderType] = useState<OrderType>("MARKET");
@@ -177,7 +195,7 @@ export default function TradePage() {
   }, []);
 
   useEffect(() => {
-    if (!modalOpen || instrumentType === "EQ") { setExpiries([]); setSelectedExpiry(null); setChain([]); setSelectedStrike(null); setSelectedOptionLtp(null); return; }
+    if (!modalOpen || instrumentType === "EQ") { setExpiries([]); setSelectedExpiry(null); setFullChain([]); setSelectedStrike(null); setSelectedOptionLtp(null); return; }
     fetch(`/api/trade/expiries?symbol=${encodeURIComponent(selectedSymbol)}`).then((r) => r.json()).then((d) => { const l: string[] = d.expiries ?? []; setExpiries(l); if (l.length) setSelectedExpiry(l[0]); }).catch(() => setExpiries([]));
   }, [modalOpen, selectedSymbol, instrumentType]);
 
@@ -187,15 +205,15 @@ export default function TradePage() {
     fetch(`/api/trade/option-chain?symbol=${encodeURIComponent(selectedSymbol)}&expiry=${encodeURIComponent(selectedExpiry)}`)
       .then((r) => r.json())
       .then((d) => {
-        const fullChain: OptionChainData[] = d.chain ?? [];
+        const incoming: OptionChainData[] = d.chain ?? [];
         const underlying = d.underlyingPrice ?? quote?.last_price ?? 0;
         const atm = calcAtm(underlying, selectedSymbol);
         setAtmStrike(atm);
-        const filtered = filterStrikes(fullChain, atm, selectedSymbol);
-        setChain(filtered);
+        setFullChain(incoming);
+        if (selectedExpiry) setChainsByExpiry((prev) => ({ ...prev, [selectedExpiry]: incoming }));
         // Smart default: preselect the ATM strike when nothing is chosen yet.
         if (selectedStrike === null) {
-          const atmRow = filtered.find((r) => r.strike_price === atm);
+          const atmRow = incoming.find((r) => r.strike_price === atm);
           if (atmRow) {
             const side = instrumentType === "PE" ? "PE" : "CE";
             setSelectedStrike(atm);
@@ -205,20 +223,88 @@ export default function TradePage() {
         }
         setChainLoading(false);
       })
-      .catch(() => { setChain([]); setChainLoading(false); });
+      .catch(() => { setFullChain([]); setChainLoading(false); });
     // selectedStrike is read only to auto-select once; re-running on it would
     // refetch the chain on every strike click.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol, selectedExpiry, instrumentType, quote?.last_price]);
 
-  function openTradeModal(symbol: string, name: string, exchange: string) {
+  // Underlying price chart for the ticket. Refetches on symbol/interval change
+  // and once when the live quote first arrives (so the mock anchors to price).
+  useEffect(() => {
+    if (!modalOpen || !selectedSymbol || !showChart) { setCandles([]); return; }
+    let cancelled = false;
+    getCandles(selectedSymbol, candleInterval, quote?.last_price ?? 0).then((res) => {
+      if (cancelled) return;
+      setCandles(res.candles);
+      setCandleSource(res.source);
+    });
+    return () => { cancelled = true; };
+    // Re-anchor once when the quote becomes available; ignore subsequent ticks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalOpen, selectedSymbol, candleInterval, showChart, (quote?.last_price ?? 0) > 0]);
+
+  // Premium movement: poll the selected contract's LTP every 5s and accumulate a
+  // session sparkline (option premiums aren't on the Realtime feed, so we poll).
+  useEffect(() => {
+    if (!modalOpen || selectedStrike == null || !selectedExpiry) { setPremiumTicks([]); return; }
+    let cancelled = false;
+    setPremiumTicks(selectedOptionLtp != null ? [{ t: Date.now(), p: selectedOptionLtp }] : []);
+    const poll = async () => {
+      const ltp = await getOptionLtp(selectedSymbol, selectedExpiry, selectedStrike, selectedSide);
+      if (cancelled || ltp == null) return;
+      setPremiumTicks((prev) => [...prev, { t: Date.now(), p: ltp }].slice(-60));
+    };
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed LTP read once on contract change
+  }, [modalOpen, selectedSymbol, selectedExpiry, selectedStrike, selectedSide]);
+
+  function openTradeModal(symbol: string, name: string, exchange: string, side: "CE" | "PE" = "CE") {
     setSelectedSymbol(symbol); setSelectedName(name); setSelectedExchange(exchange);
-    setInstrumentType("CE"); setTradeType("BUY"); setOrderType("MARKET"); setOrderQty(1);
+    setInstrumentType(side); setTradeType("BUY"); setOrderType("MARKET"); setOrderQty(1);
     setOrderPrice(""); setOrderTrigger(""); setOrderNotes(""); setShowNotes(false);
     setSlPrice(""); setTargetPrice(""); setRiskAmount(""); setTradeMode("single");
     setConfirmStep(false); setOrderSuccess(null); setQuote(null);
-    setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide("CE"); setFlashStrike(null);
+    setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide(side); setFlashStrike(null);
+    setStrikeRange(TRADE_CONFIG.strikeWindow.initial); setMoneyFilter("all");
+    setChainsByExpiry({}); // drop cached chains from the previous underlying
     setModalOpen(true); fetchQuote(symbol, exchange);
+  }
+
+  // Lazily fetch + cache the full chain for another expiry (calendar legs).
+  const loadChainFor = useCallback(async (expiry: string) => {
+    if (!selectedSymbol || chainsByExpiry[expiry]) return;
+    try {
+      const r = await fetch(`/api/trade/option-chain?symbol=${encodeURIComponent(selectedSymbol)}&expiry=${encodeURIComponent(expiry)}`);
+      const d = await r.json();
+      setChainsByExpiry((prev) => ({ ...prev, [expiry]: d.chain ?? [] }));
+    } catch { /* ignore */ }
+  }, [selectedSymbol, chainsByExpiry]);
+
+  // Re-enter a recently traded contract: open the ticket on the same symbol/side.
+  // Strike defaults to ATM (the chain re-resolves live), so this is a fast path
+  // back to the instrument, not an exact-fill restore.
+  function openFromRecent(rc: RecentContract) {
+    const side: "CE" | "PE" = rc.option_type === "PE" ? "PE" : "CE";
+    openTradeModal(rc.symbol, rc.company_name ?? rc.symbol, rc.exchange, side);
+  }
+
+  // Move the selection to the adjacent strike on the same side (◄ / ► stepper).
+  function shiftStrike(dir: -1 | 1) {
+    if (selectedStrike == null) return;
+    const sorted = chain.map((r) => r.strike_price);
+    const idx = sorted.indexOf(selectedStrike);
+    if (idx < 0) return;
+    const next = sorted[idx + dir];
+    if (next == null) {
+      // Reached the edge of the visible window — widen it if we can.
+      if (canShowMore) setStrikeRange((r) => Math.min(TRADE_CONFIG.strikeWindow.max, r + TRADE_CONFIG.strikeWindow.step));
+      return;
+    }
+    const row = chain.find((r) => r.strike_price === next);
+    if (!row) return;
+    handleStrikeSelect(next, selectedSide === "PE" ? row.pe.ltp : row.ce.ltp, selectedSide);
   }
 
   function handleStrikeSelect(strike: number, ltp: number, side: "CE" | "PE") {
@@ -228,6 +314,101 @@ export default function TradePage() {
     setTimeout(() => setFlashStrike(null), 300);
     setTimeout(() => placeOrderRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 200);
   }
+
+  // Visible window of strikes around ATM (widened by "Show more strikes"). The
+  // strategy builder and metrics read this; the table additionally applies the
+  // moneyness filter below.
+  const chain = useMemo(
+    () => filterStrikes(fullChain, atmStrike, selectedSymbol, strikeRange),
+    [fullChain, atmStrike, selectedSymbol, strikeRange]
+  );
+
+  // Table view: optionally narrowed to ITM/OTM strikes for the side being traded.
+  const tableChain = useMemo(() => {
+    if (moneyFilter === "all") return chain;
+    const side: "CE" | "PE" = instrumentType === "PE" ? "PE" : "CE";
+    return chain.filter((r) => moneyness(r.strike_price, atmStrike, side) === moneyFilter);
+  }, [chain, moneyFilter, instrumentType, atmStrike]);
+
+  const canShowMore = strikeRange < TRADE_CONFIG.strikeWindow.max &&
+    fullChain.length > chain.length;
+
+  // Aggregate chain insights for the summary bar. Max-pain and PCR use the full
+  // provider chain; the OI-change bias uses the visible window (and degrades to
+  // null when the feed doesn't supply OI-change, as live Upstox/Dhan do).
+  const chainInsights = useMemo(() => {
+    if (fullChain.length === 0) return null;
+    const totalCe = fullChain[0]?.totalCeOI || fullChain.reduce((s, r) => s + r.ce.oi, 0);
+    const totalPe = fullChain[0]?.totalPeOI || fullChain.reduce((s, r) => s + r.pe.oi, 0);
+    const pcr = totalCe > 0 ? totalPe / totalCe : 0;
+    const maxPain = fullChain.reduce((a, b) => (a.ce.oi + a.pe.oi >= b.ce.oi + b.pe.oi ? a : b)).strike_price;
+    const atmRow = fullChain.find((r) => r.strike_price === atmStrike);
+    const atmIv = atmRow ? (atmRow.ce.iv + atmRow.pe.iv) / 2 : 0;
+    const ceOiChg = chain.reduce((s, r) => s + r.ce.oiChange, 0);
+    const peOiChg = chain.reduce((s, r) => s + r.pe.oiChange, 0);
+    // Rising call OI = resistance/bearish; rising put OI = support/bullish.
+    const hasOiChg = ceOiChg !== 0 || peOiChg !== 0;
+    const bias = !hasOiChg ? null : peOiChg > ceOiChg ? "Bullish" : ceOiChg > peOiChg ? "Bearish" : "Neutral";
+    return { pcr, maxPain, atmIv, bias };
+  }, [fullChain, chain, atmStrike]);
+
+  // Recent traded contracts for the quick re-entry strip.
+  useEffect(() => {
+    if (!userId) return;
+    getRecentContracts(userId, TRADE_CONFIG.recentTradesLimit).then(setRecentContracts);
+  }, [userId]);
+
+  // Favorite option contracts (client-only, persisted in localStorage).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(FAV_KEY);
+      if (raw) setFavorites(JSON.parse(raw) as FavOption[]);
+    } catch { /* ignore malformed storage */ }
+  }, []);
+
+  // Saveable workspace: remember the user's chain columns + chart interval.
+  const workspaceLoaded = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("ts_workspace");
+      if (raw) {
+        const w = JSON.parse(raw) as { visibleCols?: Partial<typeof visibleCols>; candleInterval?: "1minute" | "30minute" };
+        if (w.visibleCols) setVisibleCols((prev) => ({ ...prev, ...w.visibleCols }));
+        if (w.candleInterval) setCandleInterval(w.candleInterval);
+      }
+    } catch { /* ignore */ }
+    workspaceLoaded.current = true;
+  }, []);
+  useEffect(() => {
+    if (!workspaceLoaded.current) return;
+    try { localStorage.setItem("ts_workspace", JSON.stringify({ visibleCols, candleInterval })); } catch { /* quota */ }
+  }, [visibleCols, candleInterval]);
+
+  const persistFavorites = useCallback((next: FavOption[]) => {
+    setFavorites(next);
+    try { localStorage.setItem(FAV_KEY, JSON.stringify(next)); } catch { /* quota */ }
+  }, []);
+
+  const selectedIsFav = useMemo(() => {
+    if (selectedStrike == null) return false;
+    const k = favKey({ symbol: selectedSymbol, side: selectedSide, strike: selectedStrike, expiry: selectedExpiry });
+    return favorites.some((f) => favKey(f) === k);
+  }, [favorites, selectedSymbol, selectedSide, selectedStrike, selectedExpiry]);
+
+  const toggleSelectedFav = useCallback(() => {
+    if (selectedStrike == null) return;
+    const entry: FavOption = { symbol: selectedSymbol, exchange: selectedExchange, name: selectedName, side: selectedSide, strike: selectedStrike, expiry: selectedExpiry };
+    const k = favKey(entry);
+    const exists = favorites.some((f) => favKey(f) === k);
+    persistFavorites(exists ? favorites.filter((f) => favKey(f) !== k) : [entry, ...favorites].slice(0, 30));
+  }, [favorites, persistFavorites, selectedSymbol, selectedExchange, selectedName, selectedSide, selectedStrike, selectedExpiry]);
+
+  // Open a favorited contract (re-enters on the same symbol/side; strike is live).
+  const openFromFav = useCallback((f: FavOption) => {
+    openTradeModal(f.symbol, f.name, f.exchange, f.side);
+    if (f.expiry) setSelectedExpiry(f.expiry);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const lotSize = TRADE_CONFIG.defaultLotSizes[selectedSymbol] ?? 1;
   const isOption = instrumentType !== "EQ";
@@ -241,6 +422,58 @@ export default function TradePage() {
     if (!row) return null;
     return selectedSide === "PE" ? row.pe.delta : row.ce.delta;
   }, [chain, selectedStrike, selectedSide]);
+
+  // IV skew: implied vol of CE and PE across the visible strikes.
+  const ivSkew = useMemo(
+    () => chain.map((r) => ({ strike: r.strike_price, ce: r.ce.iv, pe: r.pe.iv })),
+    [chain]
+  );
+
+  // Short-term momentum from the underlying candles (last ~6 bars).
+  const momentum = useMemo(() => {
+    if (candles.length < 6) return null;
+    const last = candles[candles.length - 1].c;
+    const prior = candles[candles.length - 6].c;
+    if (prior <= 0) return null;
+    const pct = ((last - prior) / prior) * 100;
+    return { pct, dir: pct > 0.1 ? "Up" : pct < -0.1 ? "Down" : "Flat" };
+  }, [candles]);
+
+  // Smart entry suggestions: for the active side, pick strikes near target deltas
+  // (conservative/balanced/aggressive) and score each with premium, breakeven and
+  // probability of profit. Needs greeks — degrades to empty when the feed has none.
+  const entrySuggestions = useMemo(() => {
+    const side: "CE" | "PE" = instrumentType === "PE" ? "PE" : "CE";
+    if (instrumentType === "EQ" || chain.length === 0) return [];
+    const hasGreeks = chain.some((r) => Math.abs(side === "CE" ? r.ce.delta : r.pe.delta) > 0.001);
+    if (!hasGreeks) return [];
+    const S0 = quote?.last_price ?? atmStrike;
+    const T = yearsToExpiry(selectedExpiry);
+    const targets = [
+      { label: "Conservative", d: 0.65 },
+      { label: "Balanced", d: 0.5 },
+      { label: "Aggressive", d: 0.3 },
+    ];
+    const seen = new Set<number>();
+    const out: { label: string; strike: number; premium: number; pop: number | null; breakeven: number; delta: number }[] = [];
+    for (const t of targets) {
+      const row = chain.reduce((best, r) => {
+        const d = Math.abs(side === "CE" ? r.ce.delta : r.pe.delta);
+        const bd = Math.abs(side === "CE" ? best.ce.delta : best.pe.delta);
+        return Math.abs(d - t.d) < Math.abs(bd - t.d) ? r : best;
+      });
+      if (seen.has(row.strike_price)) continue;
+      seen.add(row.strike_price);
+      const leg = side === "CE" ? row.ce : row.pe;
+      const premium = leg.ltp;
+      const iv = leg.iv / 100;
+      const breakeven = side === "CE" ? row.strike_price + premium : row.strike_price - premium;
+      const intrinsicAt = (s: number) => (side === "CE" ? Math.max(0, s - row.strike_price) : Math.max(0, row.strike_price - s));
+      const pop = iv > 0 && S0 > 0 ? probOfProfit((s) => intrinsicAt(s) - premium, S0, iv, T) : null;
+      out.push({ label: t.label, strike: row.strike_price, premium, pop, breakeven, delta: leg.delta });
+    }
+    return out;
+  }, [chain, instrumentType, quote, atmStrike, selectedExpiry]);
 
   const numOrNull = (s: string) => {
     const n = parseFloat(s);
@@ -261,8 +494,16 @@ export default function TradePage() {
     : null;
   const charges = estFill ? estFill.total_charges : 20;
   const totalValue = grossValue + charges;
-  const cashAfter = tradeType === "BUY" ? virtualCash - totalValue : virtualCash + grossValue - charges;
-  const canAfford = tradeType === "BUY" ? cashAfter >= 0 : true;
+  // Selling an option (with no offsetting long) writes it: premium is credited
+  // but margin is blocked. EQ sells / closing longs don't block margin.
+  const isWritingSell = isOption && tradeType === "SELL";
+  const shortMarginEst = isWritingSell
+    ? (selectedStrike ?? currentLtp) * totalShares * TRADE_CONFIG.simulation.shortMarginPercent
+    : 0;
+  const cashAfter = tradeType === "BUY"
+    ? virtualCash - totalValue
+    : virtualCash + grossValue - charges - shortMarginEst;
+  const canAfford = tradeType === "BUY" ? cashAfter >= 0 : !isWritingSell || cashAfter >= 0;
 
   async function handlePlaceOrder() {
     setPlacing(true);
@@ -274,8 +515,15 @@ export default function TradePage() {
     );
     setPlacing(false);
     if (result.success) {
-      setVirtualCash((p) => tradeType === "BUY" ? p - totalValue : p + grossValue - charges);
-      setOrderSuccess({ msg: `${tradeType === "BUY" ? "Bought" : "Sold"} ${isOption ? `${orderQty} lot` : `${totalShares} shares`} of ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} at ${INR}${(result.fill?.executed_price ?? effectivePrice).toFixed(2)}`, detail: tradeType === "BUY" ? `${INR}${totalValue.toLocaleString("en-IN", { maximumFractionDigits: 0 })} deducted` : `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited` });
+      // Re-read the authoritative balance — the cash effect differs for buys,
+      // writes (margin blocked) and closes, so don't guess it client-side.
+      reloadBalance();
+      const detail = tradeType === "BUY"
+        ? `${INR}${totalValue.toLocaleString("en-IN", { maximumFractionDigits: 0 })} deducted`
+        : isWritingSell
+          ? `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited · ~${INR}${shortMarginEst.toLocaleString("en-IN", { maximumFractionDigits: 0 })} margin blocked`
+          : `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited`;
+      setOrderSuccess({ msg: `${tradeType === "BUY" ? "Bought" : "Sold"} ${isOption ? `${orderQty} lot` : `${totalShares} shares`} of ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} at ${INR}${(result.fill?.executed_price ?? effectivePrice).toFixed(2)}`, detail });
     } else { showToast(result.message, "error"); setConfirmStep(false); }
   }
 
@@ -321,7 +569,7 @@ export default function TradePage() {
   const ls = indicesSource === "dhan" || indicesSource === "upstox" ? indicesSource : "demo";
 
   return (
-    <div className="max-w-4xl mx-auto space-y-5 sm:space-y-6">
+    <div className={`mx-auto space-y-5 sm:space-y-6 ${modalOpen ? "max-w-4xl lg:max-w-6xl" : "max-w-4xl"}`}>
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -342,16 +590,58 @@ export default function TradePage() {
         {query && <button onClick={() => { setQuery(""); setResults([]); }} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white cursor-pointer transition-colors duration-200"><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>}
       </div>
 
-      {/* Default — index cards */}
+      {/* Default — index cards (hidden on desktop while the terminal is open) */}
       {!query.trim() && (
-        <>
+        <div className={modalOpen ? "lg:hidden space-y-5 sm:space-y-6" : "space-y-5 sm:space-y-6"}>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <IndexQuickCard data={nifty} label="NIFTY 50" source={ls} onTrade={() => openTradeModal("NIFTY", "Nifty 50", "NSE")} />
             <IndexQuickCard data={bankNifty} label="BANK NIFTY" source={ls} onTrade={() => openTradeModal("BANKNIFTY", "Bank Nifty", "NSE")} />
             <IndexQuickCard data={sensex} label="SENSEX" source={ls} exchange="BSE" onTrade={() => openTradeModal("SENSEX", "Sensex", "BSE")} />
           </div>
+          {favorites.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-2">★ Favorite strikes</p>
+              <div className="flex flex-wrap gap-2">
+                {favorites.map((f) => {
+                  const tone = f.side === "PE" ? "text-red-400 border-red-500/30 hover:bg-red-500/10" : "text-green-400 border-green-500/30 hover:bg-green-500/10";
+                  return (
+                    <span key={favKey(f)} className={`group inline-flex items-center gap-1 text-xs pl-3 pr-1.5 py-1.5 rounded-full border bg-gray-900 ${tone}`}>
+                      <button onClick={() => openFromFav(f)} className="cursor-pointer active:scale-95 transition-transform duration-200">
+                        <span className="font-semibold">{f.symbol}</span> {f.strike.toLocaleString("en-IN")} {f.side}
+                      </button>
+                      <button onClick={() => persistFavorites(favorites.filter((x) => favKey(x) !== favKey(f)))} aria-label="Remove favorite"
+                        className="text-gray-600 hover:text-red-400 cursor-pointer px-0.5">✕</button>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {recentContracts.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-2">Recent trades</p>
+              <div className="flex flex-wrap gap-2">
+                {recentContracts.map((rc) => {
+                  const isOpt = rc.instrument_type === "CE" || rc.instrument_type === "PE";
+                  const tone = rc.instrument_type === "PE" ? "text-red-400 border-red-500/30 hover:bg-red-500/10"
+                    : rc.instrument_type === "CE" ? "text-green-400 border-green-500/30 hover:bg-green-500/10"
+                    : "text-violet-400 border-violet-500/30 hover:bg-violet-500/10";
+                  return (
+                    <button
+                      key={`${rc.symbol}-${rc.instrument_type}-${rc.strike_price ?? ""}-${rc.expiry_date ?? ""}`}
+                      onClick={() => openFromRecent(rc)}
+                      className={`text-xs px-3 py-1.5 rounded-full border bg-gray-900 cursor-pointer active:scale-95 transition-all duration-200 ${tone}`}
+                    >
+                      <span className="font-semibold">{rc.symbol}</span>
+                      {isOpt && rc.strike_price ? ` ${rc.strike_price.toLocaleString("en-IN")} ${rc.instrument_type}` : ` ${rc.instrument_type}`}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <p className="text-center text-xs text-gray-600">Or search for any stock or index above</p>
-        </>
+        </div>
       )}
 
       {/* Search results */}
@@ -373,8 +663,8 @@ export default function TradePage() {
         </div>
       )}
 
-      {/* Trade Modal */}
-      <Modal isOpen={modalOpen} onClose={() => { setModalOpen(false); setOrderSuccess(null); setConfirmStep(false); }} title={`${selectedSymbol} — Place Order`}>
+      {/* Trade ticket — inline terminal on desktop, bottom-sheet on mobile */}
+      <Modal size="terminal" isOpen={modalOpen} onClose={() => { setModalOpen(false); setOrderSuccess(null); setConfirmStep(false); }} title={`${selectedSymbol} — ${tradeMode === "strategy" ? "Strategy" : "Place Order"}`}>
         <div className="space-y-4">
           {orderSuccess ? (
             <div className="text-center py-6">
@@ -405,6 +695,65 @@ export default function TradePage() {
                 )}
               </div>
 
+              {/* Underlying price chart */}
+              {candles.length > 1 && (() => {
+                const first = candles[0].c;
+                const last = candles[candles.length - 1].c;
+                const up = last >= first;
+                const color = up ? "#22c55e" : "#ef4444";
+                const lo = Math.min(...candles.map((c) => c.l || c.c));
+                const hi = Math.max(...candles.map((c) => c.h || c.c));
+                const pad = (hi - lo) * 0.1 || 1;
+                const fmtT = (t: number) => new Date(t).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+                return (
+                  <div className="bg-gray-800/40 rounded-lg p-2">
+                    <div className="flex items-center justify-between mb-1 px-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-gray-400">Price</span>
+                        {candleSource === "mock" && <span className="text-[9px] text-gray-600 border border-gray-700 rounded px-1">demo</span>}
+                        {momentum && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${momentum.dir === "Up" ? "bg-green-500/15 text-green-400" : momentum.dir === "Down" ? "bg-red-500/15 text-red-400" : "bg-gray-700/50 text-gray-400"}`} title="Short-term momentum (last ~6 bars)">
+                            {momentum.dir === "Up" ? "▲" : momentum.dir === "Down" ? "▼" : "▬"} {momentum.pct >= 0 ? "+" : ""}{formatPercent(momentum.pct)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {(["1minute", "30minute"] as const).map((iv) => (
+                          <button key={iv} onClick={() => setCandleInterval(iv)}
+                            className={`text-[10px] px-1.5 py-0.5 rounded cursor-pointer active:scale-95 transition-all duration-200 ${candleInterval === iv ? "bg-violet-500/20 text-violet-300" : "text-gray-500 hover:text-white"}`}>
+                            {iv === "1minute" ? "1m" : "30m"}
+                          </button>
+                        ))}
+                        <button onClick={() => setShowChart(false)} aria-label="Hide chart" className="text-[10px] text-gray-500 hover:text-white cursor-pointer ml-1">✕</button>
+                      </div>
+                    </div>
+                    <div className="h-28 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={candles} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="priceFill" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor={color} stopOpacity={0.35} />
+                              <stop offset="100%" stopColor={color} stopOpacity={0} />
+                            </linearGradient>
+                          </defs>
+                          <XAxis dataKey="t" tickFormatter={fmtT} stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} minTickGap={40} />
+                          <YAxis domain={[lo - pad, hi + pad]} stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} width={44} tickFormatter={(v) => Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })} />
+                          <Tooltip
+                            formatter={(v) => [`${INR}${Number(v).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, "Close"]}
+                            labelFormatter={(l) => fmtT(Number(l))}
+                            contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 11 }}
+                          />
+                          <Area type="monotone" dataKey="c" stroke={color} strokeWidth={1.5} fill="url(#priceFill)" dot={false} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                );
+              })()}
+              {!showChart && (
+                <button onClick={() => setShowChart(true)} className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer transition-colors duration-200">+ Show price chart</button>
+              )}
+
               {/* Mode: Single | Strategy */}
               <div className="flex gap-1 bg-gray-800/50 p-1 rounded-lg">
                 {(["single", "strategy"] as const).map((m) => (
@@ -431,6 +780,22 @@ export default function TradePage() {
               {isOption && expiries.length > 0 && (
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-widest text-gray-400 mb-1">Expiry Date</label>
+                  {/* Quick-tabs for the nearest expiries; full list stays in the dropdown. */}
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {expiries.slice(0, 4).map((exp) => (
+                      <button
+                        key={exp}
+                        onClick={() => { setSelectedExpiry(exp); setSelectedStrike(null); setSelectedOptionLtp(null); }}
+                        className={`text-[11px] px-2.5 py-1 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${
+                          selectedExpiry === exp
+                            ? "bg-violet-500/20 text-violet-300 border border-violet-500/40"
+                            : "bg-gray-800 text-gray-400 hover:text-white border border-transparent"
+                        }`}
+                      >
+                        {fmtExpiryShort(exp)}{isMonthlyExpiry(exp) ? " · M" : ""}
+                      </button>
+                    ))}
+                  </div>
                   <div className="relative">
                     <select
                       value={selectedExpiry ?? ""}
@@ -451,6 +816,9 @@ export default function TradePage() {
               {tradeMode === "strategy" && (
                 <StrategyBuilder
                   chain={chain}
+                  chainsByExpiry={chainsByExpiry}
+                  expiries={expiries}
+                  loadChainFor={loadChainFor}
                   atmStrike={atmStrike}
                   lotSize={lotSize}
                   symbol={selectedSymbol}
@@ -462,21 +830,75 @@ export default function TradePage() {
               )}
 
               {tradeMode === "single" && (
-              <>
+              <div className="lg:grid lg:grid-cols-[1fr_360px] lg:gap-4 lg:items-start space-y-4 lg:space-y-0">
+              {/* Market pane — option chain */}
+              <div className="space-y-4 min-w-0">
               {/* Option chain — rich table */}
               {isOption && (chainLoading ? (
                 <div className="space-y-1.5 animate-pulse">{[...Array(6)].map((_, i) => <div key={i} className="h-9 bg-gray-800 rounded-lg" />)}</div>
               ) : chain.length > 0 ? (
                 <div>
-                  {/* Column toggle */}
-                  <div className="flex justify-end mb-1.5 relative">
+                  {/* Insight summary bar — sentiment / max-pain / ATM IV / OI bias */}
+                  {chainInsights && (
+                    <div className="flex items-center gap-2 mb-2 overflow-x-auto whitespace-nowrap text-[11px] pb-0.5">
+                      <span className={`px-2 py-0.5 rounded-md ${chainInsights.pcr > 1.2 ? "bg-green-500/15 text-green-400" : chainInsights.pcr < 0.8 ? "bg-red-500/15 text-red-400" : "bg-gray-700/50 text-gray-300"}`}>
+                        PCR <span className="font-semibold">{chainInsights.pcr.toFixed(2)}</span> · {chainInsights.pcr > 1.2 ? "Bullish" : chainInsights.pcr < 0.8 ? "Bearish" : "Neutral"}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-yellow-500/10 text-yellow-400">Max Pain <span className="font-semibold">{chainInsights.maxPain.toLocaleString("en-IN")}</span></span>
+                      {chainInsights.atmIv > 0 && <span className="px-2 py-0.5 rounded-md bg-gray-700/50 text-gray-300">ATM IV <span className="font-semibold">{chainInsights.atmIv.toFixed(1)}%</span></span>}
+                      {chainInsights.bias && (
+                        <span className={`px-2 py-0.5 rounded-md ${chainInsights.bias === "Bullish" ? "bg-green-500/15 text-green-400" : chainInsights.bias === "Bearish" ? "bg-red-500/15 text-red-400" : "bg-gray-700/50 text-gray-300"}`} title="OI build-up bias from rising call vs put OI">
+                          OI bias <span className="font-semibold">{chainInsights.bias}</span>
+                        </span>
+                      )}
+                      <button onClick={() => setShowSkew((v) => !v)} className={`px-2 py-0.5 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${showSkew ? "bg-violet-500/20 text-violet-300" : "bg-gray-700/50 text-gray-400 hover:text-white"}`}>IV skew</button>
+                    </div>
+                  )}
+
+                  {/* IV skew — CE vs PE implied vol across strikes */}
+                  {showSkew && ivSkew.length > 1 && (
+                    <div className="bg-gray-800/40 rounded-lg p-2 mb-2">
+                      <div className="h-32 w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ComposedChart data={ivSkew} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                            <XAxis dataKey="strike" stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} />
+                            <YAxis stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} width={30} tickFormatter={(v) => `${v}`} />
+                            <Tooltip formatter={(v, n) => [`${Number(v).toFixed(1)}%`, n === "ce" ? "Call IV" : "Put IV"]} labelFormatter={(l) => `Strike ${Number(l).toLocaleString("en-IN")}`} contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 11 }} />
+                            {atmStrike > 0 && <ReferenceLine x={atmStrike} stroke="#8b5cf6" strokeDasharray="3 3" />}
+                            <Line type="monotone" dataKey="ce" stroke="#22c55e" strokeWidth={1.5} dot={false} />
+                            <Line type="monotone" dataKey="pe" stroke="#ef4444" strokeWidth={1.5} dot={false} />
+                          </ComposedChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <p className="text-[10px] text-gray-600 mt-0.5 px-1"><span className="text-green-400">━</span> Call IV · <span className="text-red-400">━</span> Put IV · ATM dashed</p>
+                    </div>
+                  )}
+                  {/* Controls: moneyness filter (left) + column toggle (right) */}
+                  <div className="flex items-center justify-between mb-1.5 relative">
+                    <div className="flex gap-1">
+                      {(["all", "ITM", "OTM"] as const).map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => setMoneyFilter(m)}
+                          title={m === "all" ? "All strikes" : `${m} strikes for the ${instrumentType === "PE" ? "Put" : "Call"} side`}
+                          className={`text-[10px] px-2 py-0.5 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${
+                            moneyFilter === m
+                              ? "bg-violet-500/20 text-violet-300 border border-violet-500/40"
+                              : "bg-gray-800 text-gray-400 hover:text-white border border-transparent"
+                          }`}
+                        >
+                          {m === "all" ? "All" : m}
+                        </button>
+                      ))}
+                    </div>
                     <button onClick={() => setShowColMenu(!showColMenu)} className="text-[10px] text-gray-500 hover:text-violet-400 cursor-pointer transition-colors duration-200">Columns {"\u25BE"}</button>
                     {showColMenu && (
                       <div className="absolute right-0 top-5 z-50 bg-gray-800 border border-gray-700 rounded-lg p-2 shadow-xl space-y-1">
                         {(Object.keys(visibleCols) as (keyof typeof visibleCols)[]).map((col) => (
                           <label key={col} className="flex items-center gap-2 text-[10px] text-gray-300 cursor-pointer hover:text-white">
                             <input type="checkbox" checked={visibleCols[col]} onChange={() => setVisibleCols((p) => ({ ...p, [col]: !p[col] }))} className="w-3 h-3 rounded cursor-pointer" />
-                            {({ oi: "OI", oiChg: "OI Change", vol: "Volume", iv: "IV", delta: "Delta", bidAsk: "Bid/Ask" })[col]}
+                            {({ oi: "OI", oiChg: "OI Change", vol: "Volume", iv: "IV", delta: "Delta", gamma: "Gamma", theta: "Theta", vega: "Vega", bidAsk: "Bid/Ask" })[col]}
                           </label>
                         ))}
                       </div>
@@ -492,13 +914,19 @@ export default function TradePage() {
                           {visibleCols.oiChg && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5">OI CHG</th>}
                           {visibleCols.vol && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5">VOL</th>}
                           {visibleCols.iv && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Implied Volatility — expected price movement">IV</th>}
-                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Rate of change vs underlying price">{"\u0394"}</th>}
+                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Delta \u2014 rate of change vs underlying price">{"\u0394"}</th>}
+                          {visibleCols.gamma && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Gamma \u2014 rate of change of delta">{"\u0393"}</th>}
+                          {visibleCols.theta && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Theta \u2014 daily time decay">{"\u0398"}</th>}
+                          {visibleCols.vega && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5" title="Vega \u2014 sensitivity to a 1% change in IV">V</th>}
                           {visibleCols.bidAsk && <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5">B/A</th>}
                           <th className="py-1.5 px-1.5 text-right text-green-400 bg-green-500/5 font-bold">CE</th>
                           <th className="py-1.5 px-2 text-center text-violet-400 bg-violet-500/5 font-bold sticky left-0 bg-gray-900 z-10">STRIKE</th>
                           <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5 font-bold">PE</th>
                           {visibleCols.bidAsk && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">B/A</th>}
-                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">{"\u0394"}</th>}
+                          {visibleCols.vega && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Vega \u2014 sensitivity to a 1% change in IV">V</th>}
+                          {visibleCols.theta && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Theta \u2014 daily time decay">{"\u0398"}</th>}
+                          {visibleCols.gamma && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Gamma \u2014 rate of change of delta">{"\u0393"}</th>}
+                          {visibleCols.delta && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5" title="Delta \u2014 rate of change vs underlying price">{"\u0394"}</th>}
                           {visibleCols.iv && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">IV</th>}
                           {visibleCols.vol && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">VOL</th>}
                           {visibleCols.oiChg && <th className="py-1.5 px-1.5 text-left text-red-400 bg-red-500/5">OI CHG</th>}
@@ -506,7 +934,7 @@ export default function TradePage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {chain.map((row) => {
+                        {tableChain.map((row) => {
                           const isAtm = row.strike_price === atmStrike;
                           const isSel = row.strike_price === selectedStrike;
                           const isFlash = row.strike_price === flashStrike;
@@ -516,6 +944,10 @@ export default function TradePage() {
                           const pcrBg = row.pcr > 1.2 ? "bg-green-500/20 text-green-400" : row.pcr < 0.8 ? "bg-red-500/20 text-red-400" : "bg-gray-500/20 text-gray-400";
                           const ivColor = (iv: number) => iv > 20 ? "text-red-400" : iv > 16 ? "text-orange-400" : iv > 12 ? "text-yellow-400" : "text-green-400";
                           const dColor = (d: number) => Math.abs(d) > 0.5 ? (d > 0 ? "text-green-400" : "text-red-400") : Math.abs(d) > 0.3 ? "text-yellow-400" : "text-gray-500";
+                          const tColor = (t: number) => t < 0 ? "text-red-400" : "text-gray-400";
+                          const ceBuild = classifyBuildup(row.ce.changePercent, row.ce.oiChange);
+                          const peBuild = classifyBuildup(row.pe.changePercent, row.pe.oiChange);
+                          const buildLabel = (k: ReturnType<typeof classifyBuildup>) => k ? TRADE_CONFIG.buildup[k].label : "OI change";
 
                           return (
                             <tr key={row.strike_price} className={`border-b border-gray-800/30 transition-colors duration-100 ${isFlash ? "strike-selected" : ""} ${
@@ -530,13 +962,17 @@ export default function TradePage() {
                                 </td>
                               )}
                               {visibleCols.oiChg && (
-                                <td className={`py-1.5 px-1.5 text-right ${row.ce.oiChange >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                <td className={`py-1.5 px-1.5 text-right ${row.ce.oiChange >= 0 ? "text-green-400" : "text-red-400"}`} title={buildLabel(ceBuild)}>
+                                  {ceBuild && <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 align-middle ${TRADE_CONFIG.buildup[ceBuild].tone === "green" ? "bg-green-400" : "bg-red-400"}`} />}
                                   {row.ce.oiChange >= 0 ? "\u2191" : "\u2193"}{formatOI(Math.abs(row.ce.oiChange))}
                                 </td>
                               )}
                               {visibleCols.vol && <td className="py-1.5 px-1.5 text-right text-gray-500">{formatOI(row.ce.volume)}</td>}
                               {visibleCols.iv && <td className={`py-1.5 px-1.5 text-right ${ivColor(row.ce.iv)}`}>{row.ce.iv.toFixed(1)}</td>}
                               {visibleCols.delta && <td className={`py-1.5 px-1.5 text-right ${dColor(row.ce.delta)}`}>{row.ce.delta.toFixed(2)}</td>}
+                              {visibleCols.gamma && <td className="py-1.5 px-1.5 text-right text-gray-400">{row.ce.gamma.toFixed(4)}</td>}
+                              {visibleCols.theta && <td className={`py-1.5 px-1.5 text-right ${tColor(row.ce.theta)}`}>{row.ce.theta.toFixed(2)}</td>}
+                              {visibleCols.vega && <td className="py-1.5 px-1.5 text-right text-gray-400">{row.ce.vega.toFixed(2)}</td>}
                               {visibleCols.bidAsk && (
                                 <td className="py-1.5 px-1.5 text-right">
                                   <span className="text-green-400">{row.ce.bid.toFixed(1)}</span>/<span className="text-red-400">{row.ce.ask.toFixed(1)}</span>
@@ -563,11 +999,15 @@ export default function TradePage() {
                                   <span className="text-green-400">{row.pe.bid.toFixed(1)}</span>/<span className="text-red-400">{row.pe.ask.toFixed(1)}</span>
                                 </td>
                               )}
+                              {visibleCols.vega && <td className="py-1.5 px-1.5 text-left text-gray-400">{row.pe.vega.toFixed(2)}</td>}
+                              {visibleCols.theta && <td className={`py-1.5 px-1.5 text-left ${tColor(row.pe.theta)}`}>{row.pe.theta.toFixed(2)}</td>}
+                              {visibleCols.gamma && <td className="py-1.5 px-1.5 text-left text-gray-400">{row.pe.gamma.toFixed(4)}</td>}
                               {visibleCols.delta && <td className={`py-1.5 px-1.5 text-left ${dColor(row.pe.delta)}`}>{row.pe.delta.toFixed(2)}</td>}
                               {visibleCols.iv && <td className={`py-1.5 px-1.5 text-left ${ivColor(row.pe.iv)}`}>{row.pe.iv.toFixed(1)}</td>}
                               {visibleCols.vol && <td className="py-1.5 px-1.5 text-left text-gray-500">{formatOI(row.pe.volume)}</td>}
                               {visibleCols.oiChg && (
-                                <td className={`py-1.5 px-1.5 text-left ${row.pe.oiChange >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                <td className={`py-1.5 px-1.5 text-left ${row.pe.oiChange >= 0 ? "text-green-400" : "text-red-400"}`} title={buildLabel(peBuild)}>
+                                  {peBuild && <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 align-middle ${TRADE_CONFIG.buildup[peBuild].tone === "green" ? "bg-green-400" : "bg-red-400"}`} />}
                                   {row.pe.oiChange >= 0 ? "\u2191" : "\u2193"}{formatOI(Math.abs(row.pe.oiChange))}
                                 </td>
                               )}
@@ -585,7 +1025,7 @@ export default function TradePage() {
                         {/* Summary row */}
                         <tr className="border-t border-gray-700">
                           {visibleCols.oi && <td className="py-1.5 px-1.5 text-right text-green-400 font-semibold">{formatOI(chain.reduce((s, r) => s + r.ce.oi, 0))}</td>}
-                          {visibleCols.oiChg && <td />}{visibleCols.vol && <td />}{visibleCols.iv && <td />}{visibleCols.delta && <td />}{visibleCols.bidAsk && <td />}
+                          {visibleCols.oiChg && <td />}{visibleCols.vol && <td />}{visibleCols.iv && <td />}{visibleCols.delta && <td />}{visibleCols.gamma && <td />}{visibleCols.theta && <td />}{visibleCols.vega && <td />}{visibleCols.bidAsk && <td />}
                           <td className="py-1.5 px-1.5 text-right text-[10px] text-gray-500">TOTAL</td>
                           <td className="py-1.5 px-2 text-center sticky left-0 bg-gray-900 z-10">
                             <span className={`text-[10px] px-1.5 py-0.5 rounded ${chain[0]?.totalPeOI && chain[0]?.totalCeOI ? (chain[0].totalPeOI / chain[0].totalCeOI > 1 ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400") : "text-gray-500"}`}>
@@ -593,22 +1033,123 @@ export default function TradePage() {
                             </span>
                           </td>
                           <td className="py-1.5 px-1.5 text-left text-[10px] text-gray-500">TOTAL</td>
-                          {visibleCols.bidAsk && <td />}{visibleCols.delta && <td />}{visibleCols.iv && <td />}{visibleCols.vol && <td />}{visibleCols.oiChg && <td />}
+                          {visibleCols.bidAsk && <td />}{visibleCols.vega && <td />}{visibleCols.theta && <td />}{visibleCols.gamma && <td />}{visibleCols.delta && <td />}{visibleCols.iv && <td />}{visibleCols.vol && <td />}{visibleCols.oiChg && <td />}
                           {visibleCols.oi && <td className="py-1.5 px-1.5 text-left text-red-400 font-semibold">{formatOI(chain.reduce((s, r) => s + r.pe.oi, 0))}</td>}
                         </tr>
                       </tbody>
                     </table>
                   </div>
+                  {/* Strike-window controls */}
+                  <div className="flex items-center justify-center gap-3 mt-1.5">
+                    {canShowMore && (
+                      <button
+                        onClick={() => setStrikeRange((r) => Math.min(TRADE_CONFIG.strikeWindow.max, r + TRADE_CONFIG.strikeWindow.step))}
+                        className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer active:scale-95 transition-all duration-200"
+                      >
+                        + Show more strikes
+                      </button>
+                    )}
+                    {strikeRange > TRADE_CONFIG.strikeWindow.initial && (
+                      <button
+                        onClick={() => setStrikeRange(TRADE_CONFIG.strikeWindow.initial)}
+                        className="text-[11px] text-gray-500 hover:text-white cursor-pointer transition-colors duration-200"
+                      >
+                        Show fewer
+                      </button>
+                    )}
+                  </div>
+                  {tableChain.length === 0 && (
+                    <p className="text-center text-xs text-gray-500 py-3">No {moneyFilter} strikes in view — try &ldquo;All&rdquo; or show more strikes.</p>
+                  )}
                 </div>
               ) : null)}
 
-              {/* Selected option */}
-              {isOption && selectedStrike && (
-                <div className="bg-gray-800 rounded-lg p-3">
-                  <p className="text-sm font-semibold text-white">{selectedSymbol} {selectedExpiry && fmtExpiry(selectedExpiry)} {selectedStrike} {instrumentType}</p>
-                  <p className="text-sm text-gray-400 mt-0.5">LTP: {INR}{selectedOptionLtp?.toFixed(2)} | Lot: {lotSize} shares</p>
+              </div>{/* end market pane */}
+
+              {/* Ticket pane */}
+              <div className="space-y-4 min-w-0">
+              {/* Smart entry suggestions */}
+              {isOption && entrySuggestions.length > 0 && (
+                <div className="bg-gray-800/40 rounded-lg p-3">
+                  <p className="text-xs font-semibold text-gray-300 mb-2">{"💡"} Suggested {instrumentType} strikes</p>
+                  <div className="space-y-1.5">
+                    {entrySuggestions.map((s) => (
+                      <button
+                        key={s.strike}
+                        onClick={() => { const row = chain.find((r) => r.strike_price === s.strike); if (row) handleStrikeSelect(s.strike, instrumentType === "PE" ? row.pe.ltp : row.ce.ltp, instrumentType === "PE" ? "PE" : "CE"); }}
+                        className="w-full flex items-center justify-between gap-2 text-left bg-gray-900 hover:bg-gray-800 rounded-md px-2.5 py-2 cursor-pointer active:scale-[0.99] transition-all duration-200 border border-gray-800 hover:border-violet-500/30"
+                      >
+                        <div className="min-w-0">
+                          <span className="text-xs font-semibold text-white">{s.strike.toLocaleString("en-IN")} {instrumentType}</span>
+                          <span className="text-[10px] text-gray-500 ml-1.5">{s.label} · {"Δ"}{Math.abs(s.delta).toFixed(2)}</span>
+                        </div>
+                        <div className="text-right text-[11px] shrink-0">
+                          <span className="text-gray-300">{INR}{s.premium.toFixed(1)}</span>
+                          {s.pop != null && <span className="text-gray-500 ml-2">POP {formatPercent(s.pop)}</span>}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-gray-600 mt-1.5">Heuristic by delta for a {tradeType === "SELL" ? "write" : "buy"} — not advice.</p>
                 </div>
               )}
+              {/* Selected option */}
+              {isOption && selectedStrike && (() => {
+                const mny = moneyness(selectedStrike, atmStrike, selectedSide);
+                const mnyCls = mny === "ITM" ? "bg-green-500/15 text-green-400" : mny === "OTM" ? "bg-gray-700/50 text-gray-400" : "bg-violet-500/15 text-violet-300";
+                return (
+                  <div className="bg-gray-800 rounded-lg p-3 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-white flex items-center gap-2 flex-wrap">
+                        {selectedSymbol} {selectedExpiry && fmtExpiry(selectedExpiry)} {selectedStrike} {instrumentType}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${mnyCls}`}>{mny}</span>
+                      </p>
+                      <p className="text-sm text-gray-400 mt-0.5">LTP: {INR}{selectedOptionLtp?.toFixed(2)} | Lot: {lotSize} shares</p>
+                    </div>
+                    {/* Favorite + ±1 strike stepper (same side) */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={toggleSelectedFav} aria-label={selectedIsFav ? "Remove favorite" : "Add favorite"} title={selectedIsFav ? "Remove from favorites" : "Add to favorites"}
+                        className={`w-7 h-7 rounded-md bg-gray-900 flex items-center justify-center cursor-pointer active:scale-95 transition-all duration-200 text-sm ${selectedIsFav ? "text-yellow-400" : "text-gray-500 hover:text-yellow-400"}`}>{selectedIsFav ? "★" : "☆"}</button>
+                      <button onClick={() => shiftStrike(-1)} aria-label="Lower strike"
+                        className="w-7 h-7 rounded-md bg-gray-900 text-gray-300 hover:text-white flex items-center justify-center cursor-pointer active:scale-95 transition-all duration-200 text-sm font-bold">{"◀"}</button>
+                      <button onClick={() => shiftStrike(1)} aria-label="Higher strike"
+                        className="w-7 h-7 rounded-md bg-gray-900 text-gray-300 hover:text-white flex items-center justify-center cursor-pointer active:scale-95 transition-all duration-200 text-sm font-bold">{"▶"}</button>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Premium movement sparkline (scalper view) */}
+              {isOption && selectedStrike && premiumTicks.length > 1 && (() => {
+                const first = premiumTicks[0].p;
+                const last = premiumTicks[premiumTicks.length - 1].p;
+                const up = last >= first;
+                const color = up ? "#22c55e" : "#ef4444";
+                const chg = first > 0 ? ((last - first) / first) * 100 : 0;
+                return (
+                  <div className="bg-gray-800/40 rounded-lg p-2">
+                    <div className="flex items-center justify-between mb-1 px-1">
+                      <span className="text-[11px] text-gray-400">Premium movement</span>
+                      <span className={`text-[11px] font-medium ${up ? "text-green-400" : "text-red-400"}`}>{INR}{last.toFixed(2)} ({chg >= 0 ? "+" : ""}{formatPercent(chg)})</span>
+                    </div>
+                    <div className="h-16 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={premiumTicks} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="premFill" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor={color} stopOpacity={0.35} />
+                              <stop offset="100%" stopColor={color} stopOpacity={0} />
+                            </linearGradient>
+                          </defs>
+                          <YAxis hide domain={["dataMin", "dataMax"]} />
+                          <Area type="monotone" dataKey="p" stroke={color} strokeWidth={1.5} fill="url(#premFill)" dot={false} isAnimationActive={false} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <p className="text-[10px] text-gray-600 mt-0.5 px-1">Since you opened this contract · updates ~5s</p>
+                  </div>
+                );
+              })()}
 
               {/* Buy/Sell */}
               <div className="grid grid-cols-2 gap-2">
@@ -686,11 +1227,23 @@ export default function TradePage() {
                         <label className="block text-[10px] text-gray-500 mb-0.5">Stop-loss</label>
                         <input type="number" step="0.05" value={slPrice} onChange={(e) => setSlPrice(e.target.value)} placeholder={`< ${entry.toFixed(2)}`}
                           className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                        <div className="flex gap-1 mt-1">
+                          {TRADE_CONFIG.bracketPresets.stopLossPercents.map((p) => (
+                            <button key={p} onClick={() => setSlPrice((entry * (1 - p / 100)).toFixed(2))}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 cursor-pointer active:scale-95 transition-all duration-200">-{p}%</button>
+                          ))}
+                        </div>
                       </div>
                       <div>
                         <label className="block text-[10px] text-gray-500 mb-0.5">Target</label>
                         <input type="number" step="0.05" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} placeholder={`> ${entry.toFixed(2)}`}
                           className={`w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-white placeholder-gray-600 ${INTERACTION_CLASSES.formInput}`} />
+                        <div className="flex gap-1 mt-1">
+                          {TRADE_CONFIG.bracketPresets.targetPercents.map((p) => (
+                            <button key={p} onClick={() => setTargetPrice((entry * (1 + p / 100)).toFixed(2))}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 hover:bg-green-500/20 cursor-pointer active:scale-95 transition-all duration-200">+{p}%</button>
+                          ))}
+                        </div>
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
@@ -715,7 +1268,7 @@ export default function TradePage() {
                 );
               })()}
 
-              {/* Breakeven, max P&L, payoff */}
+              {/* Breakeven, max P&L, POP, payoff (expiry + today) */}
               {isOption && selectedStrike && currentLtp > 0 && (() => {
                 const premium = effectivePrice;
                 const side: "CE" | "PE" = instrumentType === "PE" ? "PE" : "CE";
@@ -725,29 +1278,51 @@ export default function TradePage() {
                 const maxLoss = tradeType === "BUY" ? premium * totalShares : longCapped;
                 const fmtMoney = (v: number) =>
                   v === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+
+                // Inputs for the BS "today" curve and POP.
+                const row = chain.find((r) => r.strike_price === selectedStrike);
+                const iv = ((side === "PE" ? row?.pe.iv : row?.ce.iv) ?? 0) / 100;
+                const S0 = quote?.last_price ?? selectedStrike;
+                const T = yearsToExpiry(selectedExpiry);
+                const dirMul = tradeType === "BUY" ? 1 : -1;
+                const intrinsicAt = (s: number) => (side === "CE" ? Math.max(0, s - selectedStrike) : Math.max(0, selectedStrike - s));
+                const lo = selectedStrike * 0.9;
+                const hi = selectedStrike * 1.1;
+                const steps = 25;
+                const data: { s: number; expiry: number; t0: number }[] = [];
+                for (let i = 0; i < steps; i++) {
+                  const s = lo + ((hi - lo) * i) / (steps - 1);
+                  const expiryPnl = dirMul * (intrinsicAt(s) - premium) * totalShares;
+                  const t0Pnl = dirMul * (bsPrice(side, s, selectedStrike, T, iv) - premium) * totalShares;
+                  data.push({ s: Math.round(s), expiry: Math.round(expiryPnl), t0: Math.round(t0Pnl) });
+                }
+                const pop = iv > 0 && S0 > 0 ? probOfProfit((s) => dirMul * (intrinsicAt(s) - premium), S0, iv, T) : null;
                 return (
                   <div className="bg-gray-800 rounded-lg p-3">
-                    <div className="grid grid-cols-3 gap-2 text-xs mb-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs mb-2">
                       <div><p className="text-gray-500">Breakeven</p><p className="text-white font-medium">{INR}{be.toFixed(2)}</p></div>
                       <div><p className="text-gray-500">Max profit</p><p className="text-green-400 font-medium">{fmtMoney(maxProfit)}</p></div>
                       <div><p className="text-gray-500">Max loss</p><p className="text-red-400 font-medium">{fmtMoney(maxLoss)}</p></div>
+                      <div><p className="text-gray-500">Prob. of profit</p><p className="text-white font-medium">{pop == null ? "—" : formatPercent(pop)}</p></div>
                     </div>
                     <div className="h-32 w-full">
                       <ResponsiveContainer width="100%" height="100%">
-                        <ComposedChart data={optionPayoff(side, tradeType, selectedStrike, premium, totalShares)} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                        <ComposedChart data={data} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
                           <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
                           <YAxis stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
                           <Tooltip
-                            formatter={(v) => `${INR}${Number(v).toLocaleString("en-IN")}`}
+                            formatter={(v, n) => [`${INR}${Number(v).toLocaleString("en-IN")}`, n === "t0" ? "Today" : "At expiry"]}
                             labelFormatter={(l) => `Underlying ${l}`}
                             contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }}
                           />
                           <ReferenceLine y={0} stroke="#4b5563" />
-                          <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+                          <Line type="monotone" dataKey="t0" stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
+                          <Line type="monotone" dataKey="expiry" stroke="#8b5cf6" strokeWidth={2} dot={false} />
                         </ComposedChart>
                       </ResponsiveContainer>
                     </div>
+                    <p className="text-[10px] text-gray-600 mt-1"><span className="text-violet-400">━</span> At expiry · <span className="text-amber-500">┄</span> Today (T+0)</p>
                   </div>
                 );
               })()}
@@ -766,6 +1341,9 @@ export default function TradePage() {
                   <p className="text-[10px] text-gray-500 leading-tight">
                     Incl. brokerage {INR}{estFill.charges.brokerage.toFixed(0)}, STT {INR}{estFill.charges.stt.toFixed(2)}, txn+SEBI+stamp+GST {INR}{(estFill.charges.txn + estFill.charges.sebi + estFill.charges.stamp + estFill.charges.gst).toFixed(2)}
                   </p>
+                )}
+                {isWritingSell && (
+                  <div className="flex justify-between"><span className="text-xs text-amber-400/80">Margin blocked (est.)</span><span className="text-sm text-amber-400">{INR}{shortMarginEst.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span></div>
                 )}
                 <div className="flex justify-between border-t border-gray-700 pt-1.5 mt-1"><span className="text-xs text-gray-400 font-medium">Total</span><span className="text-sm font-bold text-white">{INR}{totalValue.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span></div>
                 <div className="flex justify-between"><span className="text-xs text-gray-400">Balance</span><span className="text-sm text-white">{INR}{virtualCash.toLocaleString("en-IN")}</span></div>
@@ -808,7 +1386,8 @@ export default function TradePage() {
                   </div>
                 )}
               </div>
-              </>
+              </div>
+              </div>
               )}
             </>
           )}
@@ -819,35 +1398,72 @@ export default function TradePage() {
 }
 
 // ---------------- Strategy Builder ----------------
-interface StrategyLeg { id: number; action: "BUY" | "SELL"; side: "CE" | "PE"; strike: number; lots: number }
+interface StrategyLeg { id: number; action: "BUY" | "SELL"; side: "CE" | "PE"; strike: number; lots: number; expiry: string }
 let legIdCounter = 0;
 
-function legPremium(leg: StrategyLeg, chain: OptionChainData[]): number {
-  const row = chain.find((r) => r.strike_price === leg.strike);
+// Resolves the chain for a leg's own expiry (calendar spreads span expiries).
+type ChainFor = (expiry: string) => OptionChainData[];
+
+function legPremium(leg: StrategyLeg, chainFor: ChainFor): number {
+  const row = chainFor(leg.expiry).find((r) => r.strike_price === leg.strike);
   if (!row) return 0;
   return leg.side === "CE" ? row.ce.ltp : row.pe.ltp;
 }
 
-function strategyMetrics(legs: StrategyLeg[], chain: OptionChainData[], lotSize: number) {
+function legIv(leg: StrategyLeg, chainFor: ChainFor): number {
+  const row = chainFor(leg.expiry).find((r) => r.strike_price === leg.strike);
+  if (!row) return 0;
+  return (leg.side === "CE" ? row.ce.iv : row.pe.iv) / 100;
+}
+
+// Combined strategy P&L across the underlying range, plus the BS "today" (T+0)
+// curve and probability of profit. The "expiry" curve is evaluated at the
+// NEAREST leg's expiry: legs expiring then settle to intrinsic; longer-dated
+// legs (calendar/diagonal) still carry time value, priced via Black-Scholes for
+// the time remaining. `isMultiExpiry` flags that to the caller.
+function strategyMetrics(legs: StrategyLeg[], chainFor: ChainFor, lotSize: number, underlying: number) {
   if (legs.length === 0) return null;
   const strikes = legs.map((l) => l.strike);
   const lo = Math.min(...strikes) * 0.8;
   const hi = Math.max(...strikes) * 1.2;
   const steps = 60;
-  const points: { s: number; pnl: number }[] = [];
-  for (let i = 0; i < steps; i++) {
-    const s = lo + ((hi - lo) * i) / (steps - 1);
+  const nearExpiry = legs.map((l) => l.expiry).sort()[0];
+  const isMultiExpiry = legs.some((l) => l.expiry !== nearExpiry);
+
+  // Value a leg at the near expiry: intrinsic if it's also expiring, else BS for
+  // the time between near and its own expiry.
+  const valueAtNear = (leg: StrategyLeg, s: number) => {
+    const tRem = leg.expiry === nearExpiry ? 0 : yearsBetween(nearExpiry, leg.expiry);
+    if (tRem <= 0) return leg.side === "CE" ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
+    return bsPrice(leg.side, s, leg.strike, tRem, legIv(leg, chainFor));
+  };
+  const expiryPnlAt = (s: number) => {
     let pnl = 0;
     for (const leg of legs) {
-      const prem = legPremium(leg, chain);
-      const intrinsic = leg.side === "CE" ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
-      pnl += (leg.action === "BUY" ? intrinsic - prem : prem - intrinsic) * leg.lots * lotSize;
+      const prem = legPremium(leg, chainFor);
+      const val = valueAtNear(leg, s);
+      pnl += (leg.action === "BUY" ? val - prem : prem - val) * leg.lots * lotSize;
     }
-    points.push({ s: Math.round(s), pnl: Math.round(pnl) });
+    return pnl;
+  };
+  const t0PnlAt = (s: number) => {
+    let pnl = 0;
+    for (const leg of legs) {
+      const prem = legPremium(leg, chainFor);
+      const val = bsPrice(leg.side, s, leg.strike, yearsToExpiry(leg.expiry), legIv(leg, chainFor));
+      pnl += (leg.action === "BUY" ? val - prem : prem - val) * leg.lots * lotSize;
+    }
+    return pnl;
+  };
+
+  const points: { s: number; pnl: number; t0: number }[] = [];
+  for (let i = 0; i < steps; i++) {
+    const s = lo + ((hi - lo) * i) / (steps - 1);
+    points.push({ s: Math.round(s), pnl: Math.round(expiryPnlAt(s)), t0: Math.round(t0PnlAt(s)) });
   }
   let netPremium = 0;
   for (const leg of legs) {
-    netPremium += (leg.action === "BUY" ? -legPremium(leg, chain) : legPremium(leg, chain)) * leg.lots * lotSize;
+    netPremium += (leg.action === "BUY" ? -legPremium(leg, chainFor) : legPremium(leg, chainFor)) * leg.lots * lotSize;
   }
   const n = points.length;
   const rightSlope = points[n - 1].pnl - points[n - 2].pnl;
@@ -863,7 +1479,10 @@ function strategyMetrics(legs: StrategyLeg[], chain: OptionChainData[], lotSize:
       breakevens.push(Math.round(a.s + (b.s - a.s) * t));
     }
   }
-  return { points, netPremium, maxProfit, maxLoss, breakevens };
+  // POP at the near expiry, using the ATM leg's IV as the underlying vol proxy.
+  const atmIv = legIv(legs[0], chainFor) || 0;
+  const pop = atmIv > 0 && underlying > 0 ? probOfProfit(expiryPnlAt, underlying, atmIv, yearsToExpiry(nearExpiry)) : null;
+  return { points, netPremium, maxProfit, maxLoss, breakevens, pop, isMultiExpiry, nearExpiry };
 }
 
 const STRATEGY_TEMPLATES = [
@@ -873,29 +1492,37 @@ const STRATEGY_TEMPLATES = [
   { key: "bearput", label: "Bear Put" },
   { key: "ironcondor", label: "Iron Condor" },
   { key: "butterfly", label: "Call Butterfly" },
+  { key: "calendar", label: "Calendar (CE)" }, // needs a 2nd expiry
 ];
 
-function buildTemplate(key: string, atm: number, chain: OptionChainData[]): StrategyLeg[] {
+// `near` is the primary expiry; `far` (optional) is the next one, used by the
+// calendar template's long leg. All other templates are single-expiry (near).
+function buildTemplate(key: string, atm: number, chain: OptionChainData[], near: string, far: string | null): StrategyLeg[] {
   const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
   const idx = strikes.indexOf(atm);
   if (idx < 0) return [];
   const at = (off: number): number | undefined => strikes[idx + off];
-  const L = (action: "BUY" | "SELL", side: "CE" | "PE", strike: number | undefined, lots = 1): StrategyLeg | null =>
-    strike == null ? null : { id: (legIdCounter += 1), action, side, strike, lots };
+  const L = (action: "BUY" | "SELL", side: "CE" | "PE", strike: number | undefined, exp: string, lots = 1): StrategyLeg | null =>
+    strike == null ? null : { id: (legIdCounter += 1), action, side, strike, lots, expiry: exp };
   let legs: (StrategyLeg | null)[] = [];
   switch (key) {
-    case "straddle": legs = [L("BUY", "CE", at(0)), L("BUY", "PE", at(0))]; break;
-    case "strangle": legs = [L("BUY", "CE", at(1)), L("BUY", "PE", at(-1))]; break;
-    case "bullcall": legs = [L("BUY", "CE", at(0)), L("SELL", "CE", at(1))]; break;
-    case "bearput": legs = [L("BUY", "PE", at(0)), L("SELL", "PE", at(-1))]; break;
-    case "ironcondor": legs = [L("SELL", "PE", at(-1)), L("BUY", "PE", at(-2)), L("SELL", "CE", at(1)), L("BUY", "CE", at(2))]; break;
-    case "butterfly": legs = [L("BUY", "CE", at(-1)), L("SELL", "CE", at(0)), L("SELL", "CE", at(0)), L("BUY", "CE", at(1))]; break;
+    case "straddle": legs = [L("BUY", "CE", at(0), near), L("BUY", "PE", at(0), near)]; break;
+    case "strangle": legs = [L("BUY", "CE", at(1), near), L("BUY", "PE", at(-1), near)]; break;
+    case "bullcall": legs = [L("BUY", "CE", at(0), near), L("SELL", "CE", at(1), near)]; break;
+    case "bearput": legs = [L("BUY", "PE", at(0), near), L("SELL", "PE", at(-1), near)]; break;
+    case "ironcondor": legs = [L("SELL", "PE", at(-1), near), L("BUY", "PE", at(-2), near), L("SELL", "CE", at(1), near), L("BUY", "CE", at(2), near)]; break;
+    case "butterfly": legs = [L("BUY", "CE", at(-1), near), L("SELL", "CE", at(0), near), L("SELL", "CE", at(0), near), L("BUY", "CE", at(1), near)]; break;
+    // Calendar: sell the near ATM call, buy the same strike in the next expiry.
+    case "calendar": legs = far ? [L("SELL", "CE", at(0), near), L("BUY", "CE", at(0), far)] : []; break;
   }
   return legs.filter((l): l is StrategyLeg => l !== null);
 }
 
 function StrategyBuilder({
   chain,
+  chainsByExpiry,
+  expiries,
+  loadChainFor,
   atmStrike,
   lotSize,
   symbol,
@@ -905,6 +1532,9 @@ function StrategyBuilder({
   onPlaced,
 }: {
   chain: OptionChainData[];
+  chainsByExpiry: Record<string, OptionChainData[]>;
+  expiries: string[];
+  loadChainFor: (expiry: string) => void;
   atmStrike: number;
   lotSize: number;
   symbol: string;
@@ -915,23 +1545,35 @@ function StrategyBuilder({
 }) {
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
   const [placingStrategy, setPlacingStrategy] = useState(false);
-  const strikes = chain.map((r) => r.strike_price).sort((a, b) => a - b);
-  const metrics = strategyMetrics(legs, chain, lotSize);
+  // Resolve each leg's expiry to its own (cached) chain; fall back to the
+  // primary chain for the selected expiry.
+  const chainFor = useCallback(
+    (exp: string): OptionChainData[] => chainsByExpiry[exp] ?? (exp === expiry ? chain : []),
+    [chainsByExpiry, expiry, chain]
+  );
+  const metrics = strategyMetrics(legs, chainFor, lotSize, atmStrike);
   const hasShort = legs.some((l) => l.action === "SELL");
+  const farExpiry = expiries.find((e) => e !== expiry) ?? null;
+
+  // Ensure a chain is loaded whenever a leg references an expiry we haven't cached.
+  useEffect(() => {
+    for (const l of legs) if (l.expiry && !chainsByExpiry[l.expiry]) loadChainFor(l.expiry);
+  }, [legs, chainsByExpiry, loadChainFor]);
 
   async function placeStrategy() {
-    if (!userId || legs.length === 0 || hasShort || !expiry) return;
+    if (!userId || legs.length === 0) return;
     setPlacingStrategy(true);
     let ok = 0;
     let fail = 0;
     for (const leg of legs) {
+      if (!leg.expiry) { fail += 1; continue; }
       const res = await placeOrder(userId, {
         symbol,
         exchange,
         instrument_type: leg.side,
         option_type: leg.side,
         strike_price: leg.strike,
-        expiry_date: expiry,
+        expiry_date: leg.expiry,
         lot_size: lotSize,
         order_type: "MARKET",
         trade_type: leg.action,
@@ -950,17 +1592,18 @@ function StrategyBuilder({
   const fmtMoney = (v: number) =>
     Math.abs(v) === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 
-  if (chain.length === 0) {
+  if (chain.length === 0 || !expiry) {
     return <p className="text-sm text-gray-500 text-center py-6">Select an expiry to load strikes.</p>;
   }
+  const multiExpiry = expiries.length > 1;
 
   return (
     <div className="space-y-3">
       <div>
         <p className="text-xs text-gray-400 mb-1.5">Templates</p>
         <div className="flex flex-wrap gap-1.5">
-          {STRATEGY_TEMPLATES.map((t) => (
-            <button key={t.key} onClick={() => setLegs(buildTemplate(t.key, atmStrike, chain))}
+          {STRATEGY_TEMPLATES.filter((t) => t.key !== "calendar" || multiExpiry).map((t) => (
+            <button key={t.key} onClick={() => setLegs(buildTemplate(t.key, atmStrike, chain, expiry, farExpiry))}
               className="text-[11px] px-2 py-1 rounded-md bg-gray-800 text-gray-300 hover:bg-violet-500/20 hover:text-violet-300 cursor-pointer active:scale-95 transition-all duration-200">
               {t.label}
             </button>
@@ -969,33 +1612,43 @@ function StrategyBuilder({
       </div>
 
       <div className="space-y-1.5">
-        {legs.map((leg) => (
-          <div key={leg.id} className="flex items-center gap-1.5 text-xs">
+        {legs.map((leg) => {
+          const legStrikes = chainFor(leg.expiry).map((r) => r.strike_price).sort((a, b) => a - b);
+          return (
+          <div key={leg.id} className="flex items-center gap-1.5 text-xs flex-wrap">
             <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, action: l.action === "BUY" ? "SELL" : "BUY" } : l)))}
               className={`px-2 py-1 rounded-md font-semibold w-12 cursor-pointer ${leg.action === "BUY" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>{leg.action}</button>
             <button onClick={() => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, side: l.side === "CE" ? "PE" : "CE" } : l)))}
               className={`px-2 py-1 rounded-md font-semibold w-10 cursor-pointer ${leg.side === "CE" ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>{leg.side}</button>
             <select value={leg.strike} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, strike: Number(e.target.value) } : l)))}
               className="bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white cursor-pointer">
-              {strikes.map((s) => <option key={s} value={s}>{s.toLocaleString("en-IN")}</option>)}
+              {legStrikes.map((s) => <option key={s} value={s}>{s.toLocaleString("en-IN")}</option>)}
             </select>
+            {multiExpiry && (
+              <select value={leg.expiry} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, expiry: e.target.value } : l)))}
+                className="bg-gray-800 border border-gray-700 rounded-md px-1.5 py-1 text-white cursor-pointer" title="Leg expiry (calendar/diagonal)">
+                {expiries.map((e) => <option key={e} value={e}>{fmtExpiryShort(e)}</option>)}
+              </select>
+            )}
             <input type="number" min={1} value={leg.lots} onChange={(e) => setLegs((ls) => ls.map((l) => (l.id === leg.id ? { ...l, lots: Math.max(1, parseInt(e.target.value, 10) || 1) } : l)))}
               className="w-14 bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-white" />
-            <span className="text-gray-500">@{INR}{legPremium(leg, chain).toFixed(1)}</span>
+            <span className="text-gray-500">@{INR}{legPremium(leg, chainFor).toFixed(1)}</span>
             <button onClick={() => setLegs((ls) => ls.filter((l) => l.id !== leg.id))} className="text-red-400 hover:text-red-300 cursor-pointer ml-auto px-1" aria-label="Remove leg">✕</button>
           </div>
-        ))}
-        <button onClick={() => setLegs((ls) => [...ls, { id: (legIdCounter += 1), action: "BUY", side: "CE", strike: atmStrike, lots: 1 }])}
+          );
+        })}
+        <button onClick={() => setLegs((ls) => [...ls, { id: (legIdCounter += 1), action: "BUY", side: "CE", strike: atmStrike, lots: 1, expiry: expiry }])}
           className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer">+ Add leg</button>
       </div>
 
       {metrics && legs.length > 0 && (
         <div className="bg-gray-800 rounded-lg p-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs mb-2">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs mb-2">
             <div><p className="text-gray-500">{metrics.netPremium >= 0 ? "Net credit" : "Net debit"}</p><p className="text-white font-medium">{INR}{Math.abs(metrics.netPremium).toLocaleString("en-IN", { maximumFractionDigits: 0 })}</p></div>
             <div><p className="text-gray-500">Max profit</p><p className="text-green-400 font-medium">{fmtMoney(metrics.maxProfit)}</p></div>
             <div><p className="text-gray-500">Max loss</p><p className="text-red-400 font-medium">{fmtMoney(metrics.maxLoss)}</p></div>
             <div><p className="text-gray-500">Breakeven</p><p className="text-white font-medium">{metrics.breakevens.length ? metrics.breakevens.join(", ") : "—"}</p></div>
+            <div><p className="text-gray-500">Prob. of profit</p><p className="text-white font-medium">{metrics.pop == null ? "—" : formatPercent(metrics.pop)}</p></div>
           </div>
           <div className="h-40 w-full">
             <ResponsiveContainer width="100%" height="100%">
@@ -1003,23 +1656,28 @@ function StrategyBuilder({
                 <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
                 <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
                 <YAxis stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
-                <Tooltip formatter={(v) => `${INR}${Number(v).toLocaleString("en-IN")}`} labelFormatter={(l) => `Underlying ${l}`} contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }} />
+                <Tooltip formatter={(v, n) => [`${INR}${Number(v).toLocaleString("en-IN")}`, n === "t0" ? "Today" : "At expiry"]} labelFormatter={(l) => `Underlying ${l}`} contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }} />
                 <ReferenceLine y={0} stroke="#4b5563" />
+                <Line type="monotone" dataKey="t0" stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
                 <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
-          <p className="text-[10px] text-gray-600 mt-1">Combined payoff at expiry.</p>
+          <p className="text-[10px] text-gray-600 mt-1">
+            <span className="text-violet-400">━</span> {metrics.isMultiExpiry && metrics.nearExpiry ? `At ${fmtExpiryShort(metrics.nearExpiry)} (near leg; longer legs BS-valued)` : "At expiry"} · <span className="text-amber-500">┄</span> Today (T+0)
+          </p>
           <button
             onClick={placeStrategy}
-            disabled={placingStrategy || hasShort || !userId}
+            disabled={placingStrategy || !userId}
             className={`${INTERACTION_CLASSES.primaryButton} w-full mt-2 py-2.5 rounded-lg text-sm font-semibold text-white`}
           >
             {placingStrategy ? "Placing…" : `Place strategy (${legs.length} leg${legs.length > 1 ? "s" : ""})`}
           </button>
           {hasShort && (
-            <p className="text-[10px] text-amber-400 mt-1">
-              Short/writing legs can&apos;t be placed yet (engine is long-only). All-long strategies like straddle/strangle can be placed.
+            <p className="text-[10px] text-gray-500 mt-1">
+              Short legs are written (sold-to-open) and block margin per leg — the
+              sim charges margin leg-by-leg, so defined-risk spreads tie up more
+              than a real broker&apos;s spread margin.
             </p>
           )}
         </div>
@@ -1050,6 +1708,11 @@ function IndexQuickCard({ data, label, source, onTrade, exchange = "NSE" }: { da
 
 function fmtExpiry(dateStr: string): string {
   return new Date(dateStr + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+}
+
+// Compact expiry for quick-tab chips, e.g. "26 Jun".
+function fmtExpiryShort(dateStr: string): string {
+  return new Date(dateStr + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 }
 
 function isMonthlyExpiry(dateStr: string): boolean {

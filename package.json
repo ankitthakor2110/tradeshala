@@ -6,17 +6,25 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "ws:upstox": "node --env-file=.env.local scripts/upstox-ws.mjs",
+    "tv:test": "node --env-file=.env.local scripts/tv-webhook-test.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.0",
     "@supabase/supabase-js": "^2.101.1",
     "next": "16.2.1",
+    "protobufjs": "^8.6.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "recharts": "^3.8.1"
+    "recharts": "^3.8.1",
+    "ws": "^8.21.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
+    "vitest": "^3.0.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
