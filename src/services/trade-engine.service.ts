@@ -12,14 +12,62 @@ import type {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+type ContractKey = {
+  symbol: string;
+  instrument_type: string;
+  option_type: "CE" | "PE" | null;
+  strike_price: number | null;
+  expiry_date: string | null;
+  quantity: number;
+};
+
 /**
- * Margin blocked when writing (selling-to-open) a contract: a fraction of the
- * notional. Options use the strike as the notional base; equity uses price.
- * Paper-sim estimate (see TRADE_CONFIG.simulation.shortMarginPercent).
+ * Margin to block when writing a short, *net of a protective long* (SPAN-style
+ * spread margin). A long option of the same side+expiry that caps the short's
+ * risk (higher-strike CE / lower-strike PE) reduces the requirement to the
+ * spread's max loss (width × covered shares); the uncovered remainder is charged
+ * the naked notional margin. Only ever reduces vs. naked — never increases. The
+ * protective long must already exist (templates place longs before shorts).
  */
-function shortMarginFor(orderData: OrderFormData, refPrice: number): number {
-  const base = orderData.instrument_type === "EQ" ? refPrice : orderData.strike_price ?? refPrice;
-  return round2(base * orderData.quantity * TRADE_CONFIG.simulation.shortMarginPercent);
+async function computeShortMargin(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  c: ContractKey,
+  refPrice: number
+): Promise<number> {
+  const pct = TRADE_CONFIG.simulation.shortMarginPercent;
+  const base = c.instrument_type === "EQ" ? refPrice : c.strike_price ?? refPrice;
+  const nakedPerShare = base * pct;
+  const naked = round2(nakedPerShare * c.quantity);
+  if (c.instrument_type === "EQ" || c.strike_price == null || !c.expiry_date) return naked;
+
+  const side: "CE" | "PE" = c.option_type ?? (c.instrument_type === "PE" ? "PE" : "CE");
+  const { data: longs } = await supabase
+    .from("positions")
+    .select("strike_price, quantity")
+    .eq("user_id", userId)
+    .eq("status", "OPEN")
+    .eq("symbol", c.symbol)
+    .eq("instrument_type", c.instrument_type)
+    .eq("expiry_date", c.expiry_date)
+    .eq("direction", "LONG")
+    .returns<{ strike_price: number | null; quantity: number }[]>();
+
+  // Nearest protective strike (smallest width) on the correct side.
+  let best: { width: number; qty: number } | null = null;
+  for (const l of longs ?? []) {
+    if (l.strike_price == null) continue;
+    const protective = side === "CE" ? l.strike_price > c.strike_price : l.strike_price < c.strike_price;
+    if (!protective) continue;
+    const width = Math.abs(l.strike_price - c.strike_price);
+    if (!best || width < best.width) best = { width, qty: l.quantity };
+  }
+  if (!best) return naked;
+
+  const covered = Math.min(c.quantity, best.qty);
+  const uncovered = c.quantity - covered;
+  const spreadMargin = round2(best.width * covered + nakedPerShare * uncovered);
+  return Math.min(naked, spreadMargin);
 }
 
 /**
@@ -239,7 +287,7 @@ export async function validateOrder(
       }
     } else {
       // Sell-to-open / add short: block margin (net of premium received).
-      const margin = shortMarginFor(orderData, refPrice);
+      const margin = await computeShortMargin(supabase, userId, orderData, refPrice);
       const premium = orderData.quantity * refPrice;
       const required = Math.max(0, margin - premium) + brokerage;
       if (refPrice > 0 && required > balance) {
@@ -364,7 +412,28 @@ export async function placeOrder(
     // the cash math (it knows whether this opens/closes a long or a short) and
     // returns the signed cash delta: positive credits the user, negative debits.
     if (isExecuted && fill) {
-      const cashDelta = await updatePosition(userId, insertedOrder, fill, risk);
+      // If recording the position fails, the order must NOT stand as executed and
+      // NO cash may move — otherwise we'd debit the user for a position that was
+      // never created. Void the order and report the failure instead.
+      let cashDelta: number;
+      try {
+        cashDelta = await updatePosition(userId, insertedOrder, fill, risk);
+      } catch (e) {
+        await supabase
+          .from("orders")
+          .update({
+            status: "REJECTED",
+            notes: `Position update failed: ${(e as Error).message}`,
+            updated_at: new Date().toISOString(),
+          } as never)
+          .eq("id", insertedOrder.id);
+        return {
+          success: false,
+          order: { ...insertedOrder, status: "REJECTED" },
+          fill,
+          message: `Order could not be completed — failed to record the position (${(e as Error).message}). No cash was deducted.`,
+        };
+      }
       if (cashDelta >= 0) {
         await supabase.rpc("add_virtual_cash" as never, {
           p_user_id: userId,
@@ -408,9 +477,25 @@ async function updatePosition(
   const now = new Date().toISOString();
   const price = fill.executed_price;
   const charges = fill.total_charges;
-  const pct = TRADE_CONFIG.simulation.shortMarginPercent;
-  const marginBase = order.instrument_type === "EQ" ? price : order.strike_price ?? price;
-  const marginForQty = (q: number) => round2(marginBase * q * pct);
+  // A failed positions write must ABORT the order — never leave an order marked
+  // executed with cash moved but no position recorded (the silent-loss bug).
+  // Every positions write goes through this, so a DB error (e.g. a missing
+  // column) propagates to placeOrder, which then voids the order and skips the
+  // cash move instead of swallowing the failure.
+  const write = async (op: PromiseLike<{ error: { message?: string } | null }>) => {
+    const { error } = await op;
+    if (error) throw new Error(error.message ?? "positions write failed");
+  };
+  // Spread-aware margin for the order's quantity (nets a protective long).
+  const marginForOrder = () =>
+    computeShortMargin(supabase, userId, {
+      symbol: order.symbol,
+      instrument_type: order.instrument_type,
+      option_type: order.option_type,
+      strike_price: order.strike_price,
+      expiry_date: order.expiry_date,
+      quantity: order.quantity,
+    }, price);
 
   const existing = await findOpenPosition(supabase, userId, order);
 
@@ -424,7 +509,7 @@ async function updatePosition(
     const remaining = existing.quantity - closeQty;
 
     if (remaining <= 0) {
-      await supabase.from("positions").update({
+      await write(supabase.from("positions").update({
         quantity: 0,
         margin_blocked: 0,
         realized_pnl: round2((existing.realized_pnl ?? 0) + realized),
@@ -434,9 +519,9 @@ async function updatePosition(
         status: "CLOSED",
         closed_at: now,
         updated_at: now,
-      } as never).eq("id", existing.id);
+      } as never).eq("id", existing.id));
     } else {
-      await supabase.from("positions").update({
+      await write(supabase.from("positions").update({
         quantity: remaining,
         margin_blocked: round2(existing.margin_blocked - marginReleased),
         total_invested: round2(remaining * existing.average_price),
@@ -444,7 +529,7 @@ async function updatePosition(
         current_price: price,
         current_value: round2(remaining * price),
         updated_at: now,
-      } as never).eq("id", existing.id);
+      } as never).eq("id", existing.id));
     }
     return cashDelta;
   }
@@ -455,9 +540,9 @@ async function updatePosition(
     const newAvg = round2(
       (existing.quantity * existing.average_price + order.quantity * price) / newQty
     );
-    const addMargin = marginForQty(order.quantity);
+    const addMargin = await marginForOrder();
     const cashDelta = round2(price * order.quantity - charges - addMargin);
-    await supabase.from("positions").update({
+    await write(supabase.from("positions").update({
       quantity: newQty,
       average_price: newAvg,
       total_invested: round2(newQty * newAvg),
@@ -465,16 +550,16 @@ async function updatePosition(
       current_price: price,
       current_value: round2(newQty * price),
       updated_at: now,
-    } as never).eq("id", existing.id);
+    } as never).eq("id", existing.id));
     return cashDelta;
   }
 
   // --- Open a new SHORT (sell-to-open, no existing position) ---
   if (!existing && order.trade_type === "SELL") {
-    const margin = marginForQty(order.quantity);
+    const margin = await marginForOrder();
     const invested = round2(order.quantity * price); // premium notional collected
     const cashDelta = round2(price * order.quantity - charges - margin);
-    await supabase.from("positions").insert({
+    await write(supabase.from("positions").insert({
       user_id: userId,
       symbol: order.symbol,
       exchange: order.exchange,
@@ -499,7 +584,7 @@ async function updatePosition(
       target: risk?.target ?? null,
       opened_at: now,
       updated_at: now,
-    } as never);
+    } as never));
     return cashDelta;
   }
 
@@ -510,17 +595,17 @@ async function updatePosition(
       const newAvg = round2(
         (existing.quantity * existing.average_price + order.quantity * price) / newQty
       );
-      await supabase.from("positions").update({
+      await write(supabase.from("positions").update({
         quantity: newQty,
         average_price: newAvg,
         total_invested: round2(newQty * newAvg),
         current_price: price,
         current_value: round2(newQty * price),
         updated_at: now,
-      } as never).eq("id", existing.id);
+      } as never).eq("id", existing.id));
     } else {
       const invested = round2(order.quantity * price);
-      await supabase.from("positions").insert({
+      await write(supabase.from("positions").insert({
         user_id: userId,
         symbol: order.symbol,
         exchange: order.exchange,
@@ -545,7 +630,7 @@ async function updatePosition(
         target: risk?.target ?? null,
         opened_at: now,
         updated_at: now,
-      } as never);
+      } as never));
     }
     return round2(-(price * order.quantity + charges));
   }
@@ -555,7 +640,7 @@ async function updatePosition(
     const newQty = existing.quantity - order.quantity;
     if (newQty <= 0) {
       const realized = round2((price - existing.average_price) * order.quantity);
-      await supabase.from("positions").update({
+      await write(supabase.from("positions").update({
         quantity: 0,
         realized_pnl: round2((existing.realized_pnl ?? 0) + realized),
         pnl: realized,
@@ -564,17 +649,17 @@ async function updatePosition(
         status: "CLOSED",
         closed_at: now,
         updated_at: now,
-      } as never).eq("id", existing.id);
+      } as never).eq("id", existing.id));
     } else {
       const realized = round2((price - existing.average_price) * order.quantity);
-      await supabase.from("positions").update({
+      await write(supabase.from("positions").update({
         quantity: newQty,
         total_invested: round2(newQty * existing.average_price),
         realized_pnl: round2((existing.realized_pnl ?? 0) + realized),
         current_price: price,
         current_value: round2(newQty * price),
         updated_at: now,
-      } as never).eq("id", existing.id);
+      } as never).eq("id", existing.id));
     }
     return round2(price * order.quantity - charges);
   }

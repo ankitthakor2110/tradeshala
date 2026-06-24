@@ -1,8 +1,9 @@
 import type { MarketData, StockGainerLoser } from "@/types/database";
 import { MOVERS_BASKET } from "./instruments";
 import { searchInstruments, resolveEquityKey } from "./upstox-instruments";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { decryptSecret } from "@/lib/crypto/secrets";
+import { UPSTOX_RECONNECT_EMAIL } from "@/config/admin";
 
 const UPSTOX_BASE = "https://api.upstox.com/v2";
 
@@ -31,36 +32,93 @@ function setCache<T>(key: string, data: T): void {
   cache.set(key, { data, timestamp: Date.now() });
 }
 
-/**
- * Resolves the live Upstox access token. Prefers the DB-stored token from the
- * connected broker (so a daily reconnect takes effect at runtime without an
- * env change / redeploy), and falls back to the UPSTOX_ACCESS_TOKEN env var.
- * Reading uses the request's Supabase session (RLS) — when there's no session
- * (e.g. cron), it transparently falls back to the env token.
- */
-async function getAccessToken(): Promise<string | null> {
-  try {
-    const supabase = await createClient();
-    const { data } = await supabase
-      .from("broker_connections")
-      .select("access_token, token_expiry")
-      .eq("broker_id", "upstox")
-      .eq("is_connected", true)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle<{ access_token: string | null; token_expiry: string | null }>();
+// --- Shared Upstox token resolution ---------------------------------------
+// Live data is powered by ONE shared Upstox account: whoever completes the daily
+// Upstox login (the managing user, UPSTOX_RECONNECT_EMAIL) stores a fresh token
+// on their broker_connections row. These resolvers read it via the SERVICE-ROLE
+// client so the single morning login applies everywhere — the cron snapshot
+// writer (which has no user session) and every logged-in user alike — not just
+// the tab that performed the login. Falls back to the UPSTOX_ACCESS_TOKEN env.
 
-    if (data?.access_token) {
-      const valid = !data.token_expiry || new Date(data.token_expiry).getTime() > Date.now();
-      const token = valid ? decryptSecret(data.access_token) : null;
-      if (token) return token;
+interface SharedTokenRow {
+  access_token: string | null;
+  token_expiry: string | null;
+}
+
+/**
+ * The managing account's connected Upstox row, read with the service-role client
+ * (bypasses RLS, works with no session). Prefers the row owned by
+ * UPSTOX_RECONNECT_EMAIL; falls back to the most-recently-connected Upstox row
+ * (single shared account, so in practice the same account).
+ */
+async function readSharedConnection(): Promise<SharedTokenRow | null> {
+  const admin = createAdminClient();
+
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("id")
+    .ilike("email", UPSTOX_RECONNECT_EMAIL)
+    .maybeSingle<{ id: string }>();
+
+  let q = admin
+    .from("broker_connections")
+    .select("access_token, token_expiry")
+    .eq("broker_id", "upstox")
+    .eq("is_connected", true)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+  if (profile?.id) q = q.eq("user_id", profile.id);
+
+  const { data } = await q.maybeSingle<SharedTokenRow>();
+  return data ?? null;
+}
+
+/**
+ * DB-backed shared-token status, ignoring the env fallback. Used by the daily
+ * re-auth cron (to skip the email when a fresh token already exists) and the
+ * dashboard banner (to show/hide the reconnect prompt). Returns connected=false
+ * when the token is missing or past its expiry.
+ */
+export async function getSharedUpstoxStatus(): Promise<{ connected: boolean; expiresAt: string | null }> {
+  try {
+    const row = await readSharedConnection();
+    if (row?.access_token) {
+      const valid = !row.token_expiry || new Date(row.token_expiry).getTime() > Date.now();
+      if (valid) return { connected: true, expiresAt: row.token_expiry };
     }
   } catch {
-    // No session / DB unavailable — fall back to env.
+    // service role / DB unavailable
   }
+  return { connected: false, expiresAt: null };
+}
 
+// A valid token is briefly cached to spare a DB round-trip on every market-data
+// call. A missing token is NEVER cached, so a fresh reconnect is picked up at once.
+let tokenCache: { token: string; ts: number } | null = null;
+const TOKEN_CACHE_TTL = 20_000;
+
+/** The token used for all live Upstox calls: shared DB token, then env fallback. */
+export async function getSharedUpstoxToken(): Promise<string | null> {
+  if (tokenCache && Date.now() - tokenCache.ts < TOKEN_CACHE_TTL) return tokenCache.token;
+  try {
+    const row = await readSharedConnection();
+    if (row?.access_token) {
+      const valid = !row.token_expiry || new Date(row.token_expiry).getTime() > Date.now();
+      const token = valid ? decryptSecret(row.access_token) : null;
+      if (token) {
+        tokenCache = { token, ts: Date.now() };
+        return token;
+      }
+    }
+  } catch {
+    // fall through to env
+  }
   const envToken = process.env.UPSTOX_ACCESS_TOKEN;
   return envToken && !envToken.startsWith("your_") ? envToken : null;
+}
+
+async function getAccessToken(): Promise<string | null> {
+  return getSharedUpstoxToken();
 }
 
 async function getHeaders(): Promise<Record<string, string> | null> {
