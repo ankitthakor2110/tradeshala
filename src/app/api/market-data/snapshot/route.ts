@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isUpstoxConfigured } from "@/lib/market-data/upstox";
 import { snapshotOnce } from "@/lib/market-data/snapshot";
+import { runGttOnce } from "@/lib/trade/gtt";
+import { recordIvHistoryOnce } from "@/lib/market-data/iv-history";
 import { getMarketStatus } from "@/services/dashboard.service";
 
 // Hobby caps serverless functions at 300s (and cron at once/day). Intra-day
@@ -34,25 +36,31 @@ export async function GET(request: NextRequest) {
   const admin = createAdminClient();
 
   try {
+    // Capture today's IV/OI history once per invocation (daily series).
+    const ivRows = await recordIvHistoryOnce(admin).catch(() => 0);
+
     // Market closed: take a single snapshot so closing prices persist, then exit.
     if (!getMarketStatus()) {
       const written = await snapshotOnce(admin);
-      return Response.json({ ok: true, market: "closed", passes: 1, written });
+      return Response.json({ ok: true, market: "closed", passes: 1, written, ivRows });
     }
 
-    // Market open: refresh repeatedly until close to the function deadline.
+    // Market open: refresh repeatedly until close to the function deadline; run a
+    // server-side GTT pass each loop so exits fire even with no tab open (Pro).
     const deadline = Date.now() + (maxDuration * 1000 - SAFETY_MARGIN_MS);
     let passes = 0;
     let lastWritten = 0;
+    let gttActions = 0;
 
     while (Date.now() < deadline && getMarketStatus()) {
       lastWritten = await snapshotOnce(admin);
+      gttActions += await runGttOnce(admin).catch(() => 0);
       passes += 1;
       if (Date.now() + REFRESH_INTERVAL_MS >= deadline) break;
       await sleep(REFRESH_INTERVAL_MS);
     }
 
-    return Response.json({ ok: true, market: "open", passes, lastWritten });
+    return Response.json({ ok: true, market: "open", passes, lastWritten, gttActions, ivRows });
   } catch (e) {
     return Response.json(
       { ok: false, error: (e as Error).message },

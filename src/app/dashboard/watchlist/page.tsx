@@ -5,6 +5,8 @@ import { useIsMounted } from "@/hooks/useIsMounted";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
 import { searchStocks } from "@/services/market-data.service";
+import { getCurrentUser } from "@/services/auth.service";
+import { getWatchlist, addToWatchlist, removeFromWatchlist } from "@/services/watchlist.service";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { WATCHLIST_CONFIG } from "@/config/watchlist";
 import { formatIndianCurrency, formatPercent } from "@/utils/format";
@@ -23,25 +25,6 @@ interface SearchResult {
   exchange: string;
 }
 
-function loadWatchlist(): WatchlistEntry[] {
-  try {
-    const raw = localStorage.getItem(WATCHLIST_CONFIG.storageKey);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as WatchlistEntry[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveWatchlist(entries: WatchlistEntry[]): void {
-  try {
-    localStorage.setItem(WATCHLIST_CONFIG.storageKey, JSON.stringify(entries));
-  } catch {
-    // ignore quota / private-mode errors
-  }
-}
-
 function makeKey(r: { symbol: string; exchange: string }): string {
   return `${r.exchange}:${r.symbol}`;
 }
@@ -53,6 +36,7 @@ export default function WatchlistPage() {
   const [searching, setSearching] = useState(false);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [confirmRemoveKey, setConfirmRemoveKey] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Live prices for watched symbols via Supabase Realtime. A symbol shows a
@@ -67,17 +51,30 @@ export default function WatchlistPage() {
   // daily-only); only poll once there's something watched to refresh.
   useSnapshotPoller(watchedSymbols.length > 0);
 
-  // Load persisted watchlist on mount
+  // Load the user's watchlist from Supabase — persists across devices/sessions
+  // (replaces the old localStorage store). Exchange isn't stored, so default it
+  // for display; live prices key on symbol regardless.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only localStorage hydration
-    setWatchlist(loadWatchlist());
+    let active = true;
+    (async () => {
+      const user = await getCurrentUser();
+      if (!active || !user) return;
+      setUserId(user.id);
+      const rows = await getWatchlist(user.id);
+      if (!active) return;
+      setWatchlist(
+        rows.map((r) => ({
+          symbol: r.symbol,
+          company_name: r.company_name,
+          exchange: "NSE",
+          added_at: r.added_at,
+        }))
+      );
+    })();
+    return () => {
+      active = false;
+    };
   }, []);
-
-  // Persist on change
-  useEffect(() => {
-    if (!mounted) return;
-    saveWatchlist(watchlist);
-  }, [watchlist, mounted]);
 
   // Debounced search
   useEffect(() => {
@@ -107,20 +104,29 @@ export default function WatchlistPage() {
     [watchlist]
   );
 
-  function handleAdd(r: SearchResult) {
-    if (isInWatchlist(r)) return;
+  async function handleAdd(r: SearchResult) {
+    if (isInWatchlist(r) || !userId) return;
     const entry: WatchlistEntry = {
       symbol: r.symbol,
       company_name: r.company_name,
       exchange: r.exchange,
       added_at: new Date().toISOString(),
     };
-    setWatchlist((prev) => [entry, ...prev]);
+    setWatchlist((prev) => [entry, ...prev]); // optimistic
+    const ok = await addToWatchlist(userId, { symbol: r.symbol, company_name: r.company_name });
+    if (!ok) setWatchlist((prev) => prev.filter((e) => e.symbol !== r.symbol)); // revert on failure
   }
 
   function handleRemove(key: string) {
-    setWatchlist((prev) => prev.filter((e) => makeKey(e) !== key));
+    if (!userId) return;
+    const target = watchlist.find((e) => makeKey(e) === key);
+    setWatchlist((prev) => prev.filter((e) => makeKey(e) !== key)); // optimistic
     setConfirmRemoveKey(null);
+    if (target) {
+      removeFromWatchlist(userId, target.symbol).then((ok) => {
+        if (!ok) setWatchlist((prev) => [target, ...prev]); // revert on failure
+      });
+    }
   }
 
   function handleClearSearch() {

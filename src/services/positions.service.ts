@@ -8,6 +8,26 @@ import type { Order, Position, PositionSummary } from "@/types/database";
  * Database schema, so reads mirror the casting pattern the trade engine uses.
  */
 
+/** Per-user auto-square-off preference (persisted so the server GTT can act). */
+export async function getAutoSquareOff(userId: string): Promise<boolean> {
+  const supabase = createClient();
+  const { data } = await supabase
+    .from("profiles")
+    .select("auto_square_off")
+    .eq("id", userId)
+    .maybeSingle<{ auto_square_off: boolean | null }>();
+  return data?.auto_square_off ?? false;
+}
+
+export async function saveAutoSquareOff(userId: string, on: boolean): Promise<boolean> {
+  const supabase = createClient();
+  const { error } = await supabase
+    .from("profiles")
+    .update({ auto_square_off: on } as never)
+    .eq("id", userId);
+  return !error;
+}
+
 export async function getOpenPositions(userId: string): Promise<Position[]> {
   try {
     const supabase = createClient();

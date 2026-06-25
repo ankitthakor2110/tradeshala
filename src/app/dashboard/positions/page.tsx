@@ -27,9 +27,10 @@ import Skeleton from "@/components/ui/Skeleton";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { POSITIONS_CONFIG } from "@/config/positions";
 import { useIsMounted } from "@/hooks/useIsMounted";
+import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
 import { usePositions, type PositionView } from "@/hooks/usePositions";
 import { closePosition, addToPosition } from "@/services/trade-engine.service";
-import { getRecentOrders, setPositionRisk, setPositionTargets } from "@/services/positions.service";
+import { getRecentOrders, setPositionRisk, setPositionTargets, getAutoSquareOff, saveAutoSquareOff } from "@/services/positions.service";
 import { getMarketStatus } from "@/services/dashboard.service";
 import { getOptionGreeks, type OptionGreeks } from "@/services/market-data.service";
 import { showToast } from "@/components/ui/Toast";
@@ -187,6 +188,33 @@ function payoffPoints(p: PositionView): { s: number; pnl: number }[] {
     // Long option: intrinsic − premium. Short (writer): the inverse.
     const longPnl = (intrinsic - premium) * qty;
     pts.push({ s: Math.round(s), pnl: Math.round(short ? -longPnl : longPnl) });
+  }
+  return pts;
+}
+
+// Combined at-expiry payoff across multiple open option legs on one underlying —
+// a net strategy P&L curve (vs the per-position payoff in the detail drawer).
+function combinedPayoffPoints(legs: PositionView[]): { s: number; pnl: number }[] {
+  const opts = legs.filter(
+    (p) => (p.instrument_type === "CE" || p.instrument_type === "PE") && p.strike_price
+  );
+  if (opts.length < 2) return [];
+  const strikes = opts.map((p) => p.strike_price as number);
+  const lo = Math.min(...strikes) * 0.85;
+  const hi = Math.max(...strikes) * 1.15;
+  const steps = 41;
+  const pts: { s: number; pnl: number }[] = [];
+  for (let i = 0; i < steps; i++) {
+    const s = lo + ((hi - lo) * i) / (steps - 1);
+    let pnl = 0;
+    for (const p of opts) {
+      const strike = p.strike_price as number;
+      const intrinsic =
+        p.instrument_type === "CE" ? Math.max(0, s - strike) : Math.max(0, strike - s);
+      const longPnl = (intrinsic - p.average_price) * p.quantity;
+      pnl += p.direction === "SHORT" ? -longPnl : longPnl;
+    }
+    pts.push({ s: Math.round(s), pnl: Math.round(pnl) });
   }
   return pts;
 }
@@ -608,6 +636,9 @@ export default function PositionsPage() {
     isLive,
     refresh,
   } = usePositions();
+  // Self-drive fresh quotes so equity LTPs stay live even when Positions is the
+  // only open tab (it's a passive Realtime consumer otherwise).
+  useSnapshotPoller(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("open");
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>("1M");
@@ -623,6 +654,24 @@ export default function PositionsPage() {
     () => buildPnLSeries(closedPositions, chartPeriod),
     [closedPositions, chartPeriod]
   );
+
+  // Net at-expiry payoff for the underlying with the most open option legs (≥2).
+  const combinedPayoff = useMemo(() => {
+    const optLegs = openPositions.filter((p) => p.instrument_type !== "EQ" && p.strike_price);
+    if (optLegs.length < 2) return null;
+    const bySym = new Map<string, PositionView[]>();
+    for (const p of optLegs) {
+      const arr = bySym.get(p.symbol) ?? [];
+      arr.push(p);
+      bySym.set(p.symbol, arr);
+    }
+    let best: { symbol: string; legs: PositionView[] } | null = null;
+    for (const [symbol, legs] of bySym) {
+      if (legs.length >= 2 && (!best || legs.length > best.legs.length)) best = { symbol, legs };
+    }
+    if (!best) return null;
+    return { symbol: best.symbol, legCount: best.legs.length, points: combinedPayoffPoints(best.legs) };
+  }, [openPositions]);
 
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("pnl");
@@ -648,6 +697,24 @@ export default function PositionsPage() {
   useEffect(() => {
     setAutoSquareOff(localStorage.getItem("ts_auto_squareoff") === "1");
   }, []);
+
+  // Arriving from a just-placed trade (Trade page redirects with ?highlight=SYMBOL):
+  // jump to the Open tab and filter to that symbol so the new position + its live
+  // P&L are front and centre. Read from window to avoid a useSearchParams Suspense
+  // boundary; runs once on mount.
+  useEffect(() => {
+    const highlight = new URLSearchParams(window.location.search).get("highlight");
+    if (!highlight) return;
+    setActiveTab("open");
+    setSearch(highlight);
+    showToast(`Showing your latest trade: ${highlight}`, "success");
+  }, []);
+
+  // Sync auto-square-off from the user's saved preference (authoritative over the
+  // localStorage default), so the server-side GTT and the UI agree.
+  useEffect(() => {
+    if (userId) getAutoSquareOff(userId).then(setAutoSquareOff);
+  }, [userId]);
 
   // Auto square-off: close all open positions at the cutoff during market hours.
   useEffect(() => {
@@ -1230,6 +1297,43 @@ export default function PositionsPage() {
         )}
       </div>
 
+      {/* Combined strategy payoff — net of all open option legs on one underlying */}
+      {!loading && combinedPayoff && combinedPayoff.points.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-3 md:p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm md:text-base font-semibold text-white">
+              Combined payoff · {combinedPayoff.symbol}
+            </h3>
+            <span className="text-xs text-gray-400">{combinedPayoff.legCount} legs · at expiry</span>
+          </div>
+          <div className="h-[200px] md:h-[240px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={combinedPayoff.points} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                <XAxis dataKey="s" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} />
+                <YAxis
+                  stroke="#6b7280"
+                  fontSize={10}
+                  tickLine={false}
+                  axisLine={false}
+                  tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)}
+                />
+                <Tooltip
+                  formatter={(v) => formatIndianCurrency(Number(v), { sign: true })}
+                  labelFormatter={(l) => `Underlying ${l}`}
+                  contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 12 }}
+                />
+                <ReferenceLine y={0} stroke="#4b5563" />
+                <Line type="monotone" dataKey="pnl" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="text-[11px] text-gray-600 mt-2">
+            Net P&amp;L at expiry across open {combinedPayoff.symbol} option legs (approx; ignores time value before expiry).
+          </p>
+        </div>
+      )}
+
       {/* Exposure breakdown */}
       {!loading && openPositions.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl md:rounded-2xl p-3 md:p-6">
@@ -1436,9 +1540,10 @@ export default function PositionsPage() {
             const v = !autoSquareOff;
             setAutoSquareOff(v);
             localStorage.setItem("ts_auto_squareoff", v ? "1" : "0");
+            if (userId) saveAutoSquareOff(userId, v);
             if (v) squaredOffRef.current = false;
           }}
-          title="Close all open positions at 15:20 IST while this page is open"
+          title="Close all open positions at 15:20 IST (works server-side even with no tab open)"
           className={`text-xs px-3 py-2 rounded-lg border cursor-pointer active:scale-95 transition-all duration-200 ${autoSquareOff ? "border-amber-500/50 text-amber-400 bg-amber-500/10" : "border-gray-700 text-gray-300 hover:border-violet-500/50"}`}
         >
           Auto SQ-off 15:20

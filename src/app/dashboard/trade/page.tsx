@@ -3,8 +3,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
 import { getCurrentUser } from "@/services/auth.service";
-import { searchStocks, getStockQuote, getIndicesData, getCandles, getOptionLtp, type Candle } from "@/services/market-data.service";
+import { searchStocks, getStockQuote, getIndicesData, getCandles, getOptionLtp, getIvHistory, type Candle, type IvHistoryPoint } from "@/services/market-data.service";
 import { TRADE_CONFIG } from "@/config/trade";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { getPnLColor } from "@/utils/colors";
@@ -13,6 +14,7 @@ import {
   ComposedChart,
   AreaChart,
   Area,
+  Bar,
   Line,
   XAxis,
   YAxis,
@@ -122,6 +124,8 @@ export default function TradePage() {
   const [candleSource, setCandleSource] = useState<string>("");
   const [showChart, setShowChart] = useState(true);
   const [showSkew, setShowSkew] = useState(false);
+  const [showIvHistory, setShowIvHistory] = useState(false);
+  const [ivHistory, setIvHistory] = useState<IvHistoryPoint[]>([]);
   const [premiumTicks, setPremiumTicks] = useState<{ t: number; p: number }[]>([]);
 
   const [tradeType, setTradeType] = useState<TradeType>("BUY");
@@ -164,6 +168,11 @@ export default function TradePage() {
     return arr;
   }, [selectedSymbol, instrumentType]);
   const { quotes: live } = useLiveQuotes(liveSymbols);
+  // Drive the shared snapshot writer while this page is open so live_quotes stays
+  // fresh and Realtime fans the updates back here. The hook self-pauses when the
+  // tab is hidden or the market is closed, and the server throttles concurrent
+  // triggers — so this is one collapsed provider call per window, not per tab.
+  useSnapshotPoller();
 
   useEffect(() => {
     const n = live["NIFTY 50"];
@@ -260,6 +269,14 @@ export default function TradePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- seed LTP read once on contract change
   }, [modalOpen, selectedSymbol, selectedExpiry, selectedStrike, selectedSide]);
 
+  // IV/OI history for the underlying (IV Rank/Percentile + over-time chart).
+  useEffect(() => {
+    if (!modalOpen || !selectedSymbol || instrumentType === "EQ") { setIvHistory([]); return; }
+    let cancelled = false;
+    getIvHistory(selectedSymbol).then((h) => { if (!cancelled) setIvHistory(h); });
+    return () => { cancelled = true; };
+  }, [modalOpen, selectedSymbol, instrumentType]);
+
   function openTradeModal(symbol: string, name: string, exchange: string, side: "CE" | "PE" = "CE") {
     setSelectedSymbol(symbol); setSelectedName(name); setSelectedExchange(exchange);
     setInstrumentType(side); setTradeType("BUY"); setOrderType("MARKET"); setOrderQty(1);
@@ -351,6 +368,18 @@ export default function TradePage() {
     const bias = !hasOiChg ? null : peOiChg > ceOiChg ? "Bullish" : ceOiChg > peOiChg ? "Bearish" : "Neutral";
     return { pcr, maxPain, atmIv, bias };
   }, [fullChain, chain, atmStrike]);
+
+  // IV Rank / IV Percentile from the history series vs the current ATM IV.
+  const ivRankPct = useMemo(() => {
+    const current = chainInsights?.atmIv ?? 0;
+    const series = ivHistory.map((h) => h.atm_iv).filter((v) => v > 0);
+    if (current <= 0 || series.length < 2) return null;
+    const lo = Math.min(...series);
+    const hi = Math.max(...series);
+    const rank = hi > lo ? ((current - lo) / (hi - lo)) * 100 : 0;
+    const percentile = (series.filter((v) => v < current).length / series.length) * 100;
+    return { rank: Math.max(0, Math.min(100, rank)), percentile };
+  }, [ivHistory, chainInsights]);
 
   // Recent traded contracts for the quick re-entry strip.
   useEffect(() => {
@@ -518,12 +547,21 @@ export default function TradePage() {
       // Re-read the authoritative balance — the cash effect differs for buys,
       // writes (margin blocked) and closes, so don't guess it client-side.
       reloadBalance();
-      const detail = tradeType === "BUY"
-        ? `${INR}${totalValue.toLocaleString("en-IN", { maximumFractionDigits: 0 })} deducted`
-        : isWritingSell
-          ? `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited · ~${INR}${shortMarginEst.toLocaleString("en-IN", { maximumFractionDigits: 0 })} margin blocked`
-          : `${INR}${(grossValue - charges).toLocaleString("en-IN", { maximumFractionDigits: 0 })} credited`;
-      setOrderSuccess({ msg: `${tradeType === "BUY" ? "Bought" : "Sold"} ${isOption ? `${orderQty} lot` : `${totalShares} shares`} of ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} at ${INR}${(result.fill?.executed_price ?? effectivePrice).toFixed(2)}`, detail });
+      // Executed (MARKET, or LIMIT/SL that filled) → a position now exists, so
+      // send the user straight to Positions with the new trade highlighted. A
+      // full navigation freshly mounts Positions, which loads the latest data +
+      // live P&L. PENDING orders (LIMIT/SL awaiting their price) create no
+      // position yet, so we keep the in-place "waiting" confirmation instead.
+      if (result.fill) {
+        window.location.assign(
+          `/dashboard/positions?highlight=${encodeURIComponent(selectedSymbol)}`
+        );
+        return;
+      }
+      setOrderSuccess({
+        msg: `${orderType} order placed for ${selectedSymbol}${isOption && selectedStrike ? ` ${selectedStrike} ${instrumentType}` : ""} — waiting for execution`,
+        detail: "It'll appear in Positions once the price condition is met.",
+      });
     } else { showToast(result.message, "error"); setConfirmStep(false); }
   }
 
@@ -825,7 +863,6 @@ export default function TradePage() {
                   expiry={selectedExpiry}
                   exchange={selectedExchange}
                   userId={userId}
-                  onPlaced={() => { reloadBalance(); setModalOpen(false); }}
                 />
               )}
 
@@ -846,12 +883,45 @@ export default function TradePage() {
                       </span>
                       <span className="px-2 py-0.5 rounded-md bg-yellow-500/10 text-yellow-400">Max Pain <span className="font-semibold">{chainInsights.maxPain.toLocaleString("en-IN")}</span></span>
                       {chainInsights.atmIv > 0 && <span className="px-2 py-0.5 rounded-md bg-gray-700/50 text-gray-300">ATM IV <span className="font-semibold">{chainInsights.atmIv.toFixed(1)}%</span></span>}
+                      {ivRankPct && (
+                        <span className={`px-2 py-0.5 rounded-md ${ivRankPct.rank > 60 ? "bg-red-500/15 text-red-400" : ivRankPct.rank < 30 ? "bg-green-500/15 text-green-400" : "bg-gray-700/50 text-gray-300"}`} title="IV Rank (vol cheap↔rich vs its own history)">
+                          IVR <span className="font-semibold">{ivRankPct.rank.toFixed(0)}</span> · IVP {ivRankPct.percentile.toFixed(0)}
+                        </span>
+                      )}
                       {chainInsights.bias && (
                         <span className={`px-2 py-0.5 rounded-md ${chainInsights.bias === "Bullish" ? "bg-green-500/15 text-green-400" : chainInsights.bias === "Bearish" ? "bg-red-500/15 text-red-400" : "bg-gray-700/50 text-gray-300"}`} title="OI build-up bias from rising call vs put OI">
                           OI bias <span className="font-semibold">{chainInsights.bias}</span>
                         </span>
                       )}
                       <button onClick={() => setShowSkew((v) => !v)} className={`px-2 py-0.5 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${showSkew ? "bg-violet-500/20 text-violet-300" : "bg-gray-700/50 text-gray-400 hover:text-white"}`}>IV skew</button>
+                      {ivHistory.length > 1 && (
+                        <button onClick={() => setShowIvHistory((v) => !v)} className={`px-2 py-0.5 rounded-md cursor-pointer active:scale-95 transition-all duration-200 ${showIvHistory ? "bg-violet-500/20 text-violet-300" : "bg-gray-700/50 text-gray-400 hover:text-white"}`}>IV/OI history</button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* IV & OI over time */}
+                  {showIvHistory && ivHistory.length > 1 && (
+                    <div className="bg-gray-800/40 rounded-lg p-2 mb-2">
+                      <div className="h-36 w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ComposedChart data={ivHistory} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                            <XAxis dataKey="captured_on" stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} tickFormatter={(d) => new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} minTickGap={30} />
+                            <YAxis yAxisId="iv" stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} width={28} tickFormatter={(v) => `${v}`} />
+                            <YAxis yAxisId="oi" orientation="right" stroke="#6b7280" fontSize={9} tickLine={false} axisLine={false} width={32} tickFormatter={(v) => (Math.abs(v) >= 1e7 ? `${(v / 1e7).toFixed(0)}Cr` : Math.abs(v) >= 1e5 ? `${(v / 1e5).toFixed(0)}L` : `${v}`)} />
+                            <Tooltip
+                              formatter={(v, n) => [n === "atm_iv" ? `${Number(v).toFixed(1)}%` : Number(v).toLocaleString("en-IN"), n === "atm_iv" ? "ATM IV" : n === "total_ce_oi" ? "Call OI" : "Put OI"]}
+                              labelFormatter={(l) => new Date(`${l}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+                              contentStyle={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, fontSize: 11 }}
+                            />
+                            <Bar yAxisId="oi" dataKey="total_ce_oi" fill="#22c55e" opacity={0.25} />
+                            <Bar yAxisId="oi" dataKey="total_pe_oi" fill="#ef4444" opacity={0.25} />
+                            <Line yAxisId="iv" type="monotone" dataKey="atm_iv" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+                          </ComposedChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <p className="text-[10px] text-gray-600 mt-0.5 px-1"><span className="text-violet-400">━</span> ATM IV · <span className="text-green-400">▮</span> Call OI · <span className="text-red-400">▮</span> Put OI</p>
                     </div>
                   )}
 
@@ -1510,8 +1580,10 @@ function buildTemplate(key: string, atm: number, chain: OptionChainData[], near:
     case "strangle": legs = [L("BUY", "CE", at(1), near), L("BUY", "PE", at(-1), near)]; break;
     case "bullcall": legs = [L("BUY", "CE", at(0), near), L("SELL", "CE", at(1), near)]; break;
     case "bearput": legs = [L("BUY", "PE", at(0), near), L("SELL", "PE", at(-1), near)]; break;
-    case "ironcondor": legs = [L("SELL", "PE", at(-1), near), L("BUY", "PE", at(-2), near), L("SELL", "CE", at(1), near), L("BUY", "CE", at(2), near)]; break;
-    case "butterfly": legs = [L("BUY", "CE", at(-1), near), L("SELL", "CE", at(0), near), L("SELL", "CE", at(0), near), L("BUY", "CE", at(1), near)]; break;
+    // Longs first so the engine sees the protective wing when the short places
+    // (enables spread margin instead of naked margin).
+    case "ironcondor": legs = [L("BUY", "PE", at(-2), near), L("SELL", "PE", at(-1), near), L("BUY", "CE", at(2), near), L("SELL", "CE", at(1), near)]; break;
+    case "butterfly": legs = [L("BUY", "CE", at(-1), near), L("BUY", "CE", at(1), near), L("SELL", "CE", at(0), near), L("SELL", "CE", at(0), near)]; break;
     // Calendar: sell the near ATM call, buy the same strike in the next expiry.
     case "calendar": legs = far ? [L("SELL", "CE", at(0), near), L("BUY", "CE", at(0), far)] : []; break;
   }
@@ -1529,7 +1601,6 @@ function StrategyBuilder({
   expiry,
   exchange,
   userId,
-  onPlaced,
 }: {
   chain: OptionChainData[];
   chainsByExpiry: Record<string, OptionChainData[]>;
@@ -1541,7 +1612,6 @@ function StrategyBuilder({
   expiry: string | null;
   exchange: string;
   userId: string;
-  onPlaced: () => void;
 }) {
   const [legs, setLegs] = useState<StrategyLeg[]>([]);
   const [placingStrategy, setPlacingStrategy] = useState(false);
@@ -1563,10 +1633,16 @@ function StrategyBuilder({
   async function placeStrategy() {
     if (!userId || legs.length === 0) return;
     setPlacingStrategy(true);
-    let ok = 0;
-    let fail = 0;
+
+    // Place legs sequentially, tracking what filled. If ANY leg fails, unwind the
+    // already-placed legs (opposite MARKET order each) so the strategy is
+    // effectively all-or-nothing — no partial position with naked-leg risk.
+    const placed: { leg: (typeof legs)[number]; qty: number }[] = [];
+    let failReason: string | null = null;
+
     for (const leg of legs) {
-      if (!leg.expiry) { fail += 1; continue; }
+      if (!leg.expiry) { failReason = "a leg is missing its expiry"; break; }
+      const qty = leg.lots * lotSize;
       const res = await placeOrder(userId, {
         symbol,
         exchange,
@@ -1577,17 +1653,44 @@ function StrategyBuilder({
         lot_size: lotSize,
         order_type: "MARKET",
         trade_type: leg.action,
-        quantity: leg.lots * lotSize,
+        quantity: qty,
         price: null,
         trigger_price: null,
         notes: "Strategy",
       });
-      if (res.success) ok += 1;
-      else fail += 1;
+      if (res.success) placed.push({ leg, qty });
+      else { failReason = res.message; break; }
     }
+
+    if (failReason) {
+      for (const p of placed) {
+        await placeOrder(userId, {
+          symbol,
+          exchange,
+          instrument_type: p.leg.side,
+          option_type: p.leg.side,
+          strike_price: p.leg.strike,
+          expiry_date: p.leg.expiry,
+          lot_size: lotSize,
+          order_type: "MARKET",
+          trade_type: p.leg.action === "BUY" ? "SELL" : "BUY",
+          quantity: p.qty,
+          price: null,
+          trigger_price: null,
+          notes: "Strategy rollback",
+        });
+      }
+      setPlacingStrategy(false);
+      showToast(
+        `Strategy not placed — ${failReason}.${placed.length ? ` Rolled back ${placed.length} placed leg(s).` : ""}`,
+        "error"
+      );
+      return;
+    }
+
     setPlacingStrategy(false);
-    showToast(`Strategy: ${ok} leg(s) placed${fail ? `, ${fail} failed` : ""}`, fail ? "error" : "success");
-    onPlaced();
+    showToast(`Strategy placed (${legs.length} leg${legs.length > 1 ? "s" : ""})`, "success");
+    window.location.assign(`/dashboard/positions?highlight=${encodeURIComponent(symbol)}`);
   }
   const fmtMoney = (v: number) =>
     Math.abs(v) === Infinity ? "Unlimited" : `${INR}${Math.abs(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
