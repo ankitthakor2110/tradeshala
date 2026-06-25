@@ -39,12 +39,19 @@ async function handleUpstox(
   // which also derives from the request origin — so they always agree.
   const redirectUri = `${origin}/api/broker/oauth/callback`;
 
-  // Credentials from the saved DB row, falling back to env (.env.local) — the
-  // DB secret is encrypted, the env secret is plaintext.
-  const apiKey = connection?.api_key ?? process.env.UPSTOX_API_KEY ?? "";
-  const apiSecret = connection?.api_secret
-    ? decryptSecret(connection.api_secret) ?? ""
-    : process.env.UPSTOX_API_SECRET ?? "";
+  // Prefer the ENVIRONMENT's own Upstox app credentials so each deploy (local vs
+  // prod) authenticates as its OWN app. The client_id + client_secret used here
+  // MUST be the same app whose redirect URI is registered and whose authorize
+  // step ran — so env wins over the shared DB row, which may hold another
+  // environment's key. Fall back to saved creds only when env is unset.
+  const envKey = process.env.UPSTOX_API_KEY;
+  const envSecret = process.env.UPSTOX_API_SECRET;
+  const apiKey =
+    (envKey && !envKey.startsWith("your_") ? envKey : null) ?? connection?.api_key ?? "";
+  const apiSecret =
+    (envSecret && !envSecret.startsWith("your_") ? envSecret : null) ??
+    (connection?.api_secret ? decryptSecret(connection.api_secret) : null) ??
+    "";
 
   if (!apiKey || !apiSecret) {
     return redirectWithStatus(origin, "error", {

@@ -33,12 +33,14 @@ export async function GET(request: NextRequest) {
     .eq("broker_id", "upstox")
     .maybeSingle<{ api_key: string | null }>();
 
-  // Prefer the saved API key; fall back to the env-configured one so a setup
-  // done via .env.local (no DB row) can still reconnect. The callback persists
-  // a DB row on success, so subsequent reconnects work from either source.
+  // Prefer the ENVIRONMENT's own Upstox app key. Local and prod use different
+  // Upstox apps (different client_id), and the client_id MUST belong to the same
+  // app whose redirect URI is registered — so the env key (which is per-deploy)
+  // must win over any key saved in the shared broker_connections row. Fall back
+  // to the saved key only when no env key is configured (UI-based setup).
   const envKey = process.env.UPSTOX_API_KEY;
   const apiKey =
-    connection?.api_key ?? (envKey && !envKey.startsWith("your_") ? envKey : null);
+    (envKey && !envKey.startsWith("your_") ? envKey : null) ?? connection?.api_key ?? null;
 
   // Nothing to authorize with anywhere — guide the user to set it up.
   if (!apiKey) {
