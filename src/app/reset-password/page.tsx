@@ -2,13 +2,18 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import FormInput from "@/components/ui/FormInput";
 import BrandLogo from "@/components/ui/BrandLogo";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { authConfig } from "@/config/auth";
 import { validatePassword } from "@/utils/validation";
 import { resetPassword } from "@/services/auth.service";
+import { createClient } from "@/lib/supabase/client";
 import type { PasswordStrength } from "@/types/auth";
+
+// Recovery-link state: are we on a valid Supabase password-recovery session?
+type LinkState = "checking" | "valid" | "invalid";
 
 function getPasswordStrength(password: string): PasswordStrength {
   if (password.length < 8) return "weak";
@@ -34,10 +39,37 @@ export default function ResetPasswordPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [linkState, setLinkState] = useState<LinkState>("checking");
 
   const strength: PasswordStrength = password
     ? getPasswordStrength(password)
     : "weak";
+
+  // Only allow setting a new password when Supabase has established a recovery
+  // session from the email link. The link sets it asynchronously (detectSessionInUrl),
+  // so we listen for PASSWORD_RECOVERY / a session AND check getSession, with a
+  // timeout fallback that marks an expired/invalid link instead of showing a
+  // form that will only fail on submit.
+  useEffect(() => {
+    const supabase = createClient();
+    let resolved = false;
+    const finish = (ok: boolean) => {
+      if (resolved) return;
+      resolved = true;
+      setLinkState(ok ? "valid" : "invalid");
+    };
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY" || session) finish(true);
+    });
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) finish(true);
+    });
+    const timer = setTimeout(() => finish(false), 2500);
+    return () => {
+      sub.subscription.unsubscribe();
+      clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (success) {
@@ -109,7 +141,21 @@ export default function ResetPasswordPage() {
         </div>
 
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-8">
-          {success ? (
+          {linkState === "checking" ? (
+            <p className="text-center text-sm text-gray-400 py-6">Verifying your reset link…</p>
+          ) : linkState === "invalid" && !success ? (
+            <div className="text-center py-4">
+              <p className="text-sm text-red-400 mb-4">
+                This password reset link is invalid or has expired.
+              </p>
+              <Link
+                href="/forgot-password"
+                className="text-sm text-violet-400 hover:text-violet-300 cursor-pointer"
+              >
+                Request a new reset link →
+              </Link>
+            </div>
+          ) : success ? (
             <div className="text-center py-4">
               <div className="w-16 h-16 mx-auto mb-4 bg-violet-500/10 border border-violet-500/20 rounded-full flex items-center justify-center">
                 <svg

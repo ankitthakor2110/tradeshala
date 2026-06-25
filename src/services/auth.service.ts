@@ -257,18 +257,16 @@ export async function deleteAccount(
       return { success: false, error: "Incorrect password." };
     }
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return { success: false, error: "User not found." };
+    // Password OK and a session is now established — delete the auth user
+    // server-side (the browser SDK can't). This cascades to profiles + all
+    // user-scoped tables, so the login is truly revoked (not just the profile row).
+    const res = await fetch("/api/account/delete", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return { success: false, error: body?.error ?? "Failed to delete account." };
     }
 
-    // Delete profile data (cascades will handle related tables)
-    await supabase.from("profiles").delete().eq("id", user.id);
-
-    // Sign out after deletion
+    // Clear the local session after deletion.
     await supabase.auth.signOut();
 
     return { success: true, error: null };

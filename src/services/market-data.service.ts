@@ -1,4 +1,39 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@/lib/supabase/client";
 import type { MarketData, StockGainerLoser, OptionLeg } from "@/types/database";
+
+export interface IvHistoryPoint {
+  captured_on: string;
+  atm_iv: number;
+  pcr: number;
+  total_ce_oi: number;
+  total_pe_oi: number;
+  max_pain: number;
+  underlying: number;
+}
+
+/**
+ * Daily IV/OI/PCR history for an underlying (written by the snapshot flow into
+ * `iv_history`). Powers IV Rank / IV Percentile and the IV/OI-over-time chart.
+ * Empty until the writer has run on a few days.
+ */
+export async function getIvHistory(symbol: string, days = 250): Promise<IvHistoryPoint[]> {
+  try {
+    const supabase = createClient() as unknown as SupabaseClient;
+    const since = new Date(Date.now() - days * 86_400_000).toLocaleDateString("en-CA");
+    const { data, error } = await supabase
+      .from("iv_history")
+      .select("captured_on, atm_iv, pcr, total_ce_oi, total_pe_oi, max_pain, underlying")
+      .eq("symbol", symbol)
+      .gte("captured_on", since)
+      .order("captured_on", { ascending: true })
+      .returns<IvHistoryPoint[]>();
+    if (error || !data) return [];
+    return data;
+  } catch {
+    return [];
+  }
+}
 
 export interface OptionGreeks {
   ltp: number;
@@ -163,6 +198,34 @@ export async function getCandles(
     return { candles: data.candles ?? [], source: data.source ?? "unavailable" };
   } catch {
     return { candles: [], source: "unavailable" };
+  }
+}
+
+/**
+ * All option premiums for one expiry as a map keyed by `${strike}:${side}` — one
+ * chain fetch covers every held strike on that expiry. Used to overlay live P&L
+ * on open option positions (premiums aren't on the Realtime underlying feed).
+ */
+export async function getOptionLtpMap(
+  symbol: string,
+  expiry: string | null
+): Promise<Record<string, number>> {
+  try {
+    if (!expiry) return {};
+    const res = await fetch(
+      `/api/trade/option-chain?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiry)}`
+    );
+    if (!res.ok) return {};
+    const data = await res.json();
+    const chain: { strike_price: number; ce?: { ltp?: number }; pe?: { ltp?: number } }[] = data.chain ?? [];
+    const map: Record<string, number> = {};
+    for (const r of chain) {
+      if (typeof r.ce?.ltp === "number") map[`${r.strike_price}:CE`] = r.ce.ltp;
+      if (typeof r.pe?.ltp === "number") map[`${r.strike_price}:PE`] = r.pe.ltp;
+    }
+    return map;
+  } catch {
+    return {};
   }
 }
 

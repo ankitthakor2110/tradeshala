@@ -9,12 +9,14 @@ import {
   getMarketStatus,
 } from "@/services/dashboard.service";
 import { getCurrentUser } from "@/services/auth.service";
-import { getIndicesData, getGainersLosers } from "@/services/market-data.service";
+import { getIndicesData, getGainersLosers, getCandles } from "@/services/market-data.service";
 import { getPnLColor } from "@/utils/colors";
 import { timeAgo } from "@/utils/format";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
+import { usePositions } from "@/hooks/usePositions";
+import { getVirtualCash } from "@/services/portfolio.service";
 import IndexCard, { IndexCardSkeleton } from "@/components/dashboard/IndexCard";
 import LiveBadge from "@/components/ui/LiveBadge";
 import type { DashboardStats, IndexData, StockGainerLoser } from "@/types/database";
@@ -50,7 +52,19 @@ function DashboardContent() {
   const [userName, setUserName] = useState("");
   const [marketPhase, setMarketPhase] = useState<MarketPhase>("closed");
   const [marketOpen, setMarketOpen] = useState(false);
-  const stats: DashboardStats = dashboardConfig.mockStats;
+  // Real account snapshot (replaces the old hardcoded mockStats): cash from
+  // profiles, value/P&L from the live positions summary.
+  const { summary, userId } = usePositions();
+  const [virtualCash, setVirtualCash] = useState<number | null>(null);
+  useEffect(() => {
+    if (userId) getVirtualCash(userId).then(setVirtualCash);
+  }, [userId]);
+  const stats: DashboardStats = {
+    virtualCash: virtualCash ?? dashboardConfig.mockStats.virtualCash,
+    portfolioValue: summary.currentValue,
+    totalPnL: summary.overallPnL,
+    totalPnLPercent: summary.overallPnLPercent,
+  };
 
   const [indices, setIndices] = useState<IndexData[]>([]);
   const [isLiveData, setIsLiveData] = useState(false);
@@ -67,8 +81,26 @@ function DashboardContent() {
   // Live index prices pushed over Supabase Realtime. The poller keeps the
   // server-side `live_quotes` table fresh while this page is open (replaces the
   // per-minute Vercel Cron loop, which Hobby caps at once/day).
-  const { quotes: liveQuotes } = useLiveQuotes(["NIFTY 50", "BANK NIFTY"]);
+  const { quotes: liveQuotes } = useLiveQuotes(["NIFTY 50", "BANK NIFTY", "SENSEX"]);
   useSnapshotPoller();
+
+  // Real intraday closes for the index sparklines (fetched once), replacing the
+  // synthetic mock seed. Held in a ref so the poll's index rebuild can read the
+  // latest without re-triggering. Falls back to the mock seed when unavailable.
+  const sparklinesRef = useRef<Record<string, number[]>>({});
+  useEffect(() => {
+    const map: [string, string][] = [["NIFTY 50", "NIFTY"], ["BANK NIFTY", "BANKNIFTY"]];
+    (async () => {
+      const entries = await Promise.all(
+        map.map(async ([name, sym]) => {
+          const { candles } = await getCandles(sym);
+          const closes = candles.map((k) => k.c).filter((n) => typeof n === "number");
+          return [name, closes.slice(-24)] as const;
+        })
+      );
+      sparklinesRef.current = Object.fromEntries(entries.filter(([, c]) => c.length > 2));
+    })();
+  }, []);
 
   const { labels, currency } = dashboardConfig;
 
@@ -91,7 +123,7 @@ function DashboardContent() {
           change: n.change,
           changePercent: Math.abs(n.change_percent),
           isPositive: n.change >= 0,
-          sparklineData: mockIndices[0]?.sparklineData ?? [],
+          sparklineData: sparklinesRef.current["NIFTY 50"] ?? mockIndices[0]?.sparklineData ?? [],
         });
       }
 
@@ -103,7 +135,7 @@ function DashboardContent() {
           change: b.change,
           changePercent: Math.abs(b.change_percent),
           isPositive: b.change >= 0,
-          sparklineData: mockIndices[1]?.sparklineData ?? [],
+          sparklineData: sparklinesRef.current["BANK NIFTY"] ?? mockIndices[1]?.sparklineData ?? [],
         });
       }
 
@@ -337,7 +369,7 @@ function DataStatusBanner({
       <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-2.5 text-sm">
         <LiveBadge source={source} lastUpdated={lastUpdated} />
         <span className="text-green-400">Live market data active</span>
-        <span className="text-gray-500 text-xs ml-auto">Auto-refreshes every 30s</span>
+        <span className="text-gray-500 text-xs ml-auto">Auto-refreshes every 15s</span>
       </div>
     );
   }

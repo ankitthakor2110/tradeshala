@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isUpstoxConfigured } from "@/lib/market-data/upstox";
 import { snapshotOnce } from "@/lib/market-data/snapshot";
+import { runGttOnce } from "@/lib/trade/gtt";
 import { getMarketStatus } from "@/services/dashboard.service";
 
 export const dynamic = "force-dynamic";
@@ -53,9 +54,13 @@ export async function POST() {
 
   try {
     const written = await snapshotOnce(admin);
+    // Drive a server-side GTT pass too: on Hobby this is the only intraday
+    // server compute, so any open tab keeps everyone's exits firing.
+    const gttActions = await runGttOnce(admin).catch(() => 0);
     return Response.json({
       ok: true,
       written,
+      gttActions,
       market: getMarketStatus() ? "open" : "closed",
     });
   } catch (e) {

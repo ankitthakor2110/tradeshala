@@ -1,9 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { getPublicOrigin } from "@/lib/app-url";
 import type { BrokerConnection } from "@/types/database";
-
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-const REDIRECT_URI = `${APP_URL}/api/broker/oauth/callback`;
 
 export async function GET(request: NextRequest) {
   try {
@@ -32,15 +30,28 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    // redirect_uri must come from the real request origin (not NEXT_PUBLIC_APP_URL)
+    // so it matches the broker app's registered callback — same fix as the
+    // reconnect/callback routes (prevents Upstox UDAPI100068).
+    const REDIRECT_URI = `${getPublicOrigin(request)}/api/broker/oauth/callback`;
+
     // Fetch saved API key for this broker
     const { data: connection } = await supabase
       .from("broker_connections")
       .select("*")
       .eq("user_id", user.id)
       .eq("broker_id", brokerId)
-      .single<BrokerConnection>();
+      .maybeSingle<BrokerConnection>();
 
-    if (!connection?.api_key) {
+    // For Upstox, prefer the per-deploy env app key (local vs prod use different
+    // apps) and fall back to a saved key — matching the reconnect route, so the
+    // on-page "token expiring → refresh" buttons work for env-only setups too.
+    const envKey = process.env.UPSTOX_API_KEY;
+    const upstoxKey =
+      (envKey && !envKey.startsWith("your_") ? envKey : null) ?? connection?.api_key ?? null;
+    const clientId = brokerId === "upstox" ? upstoxKey : connection?.api_key ?? null;
+
+    if (!clientId) {
       return Response.json(
         { error: "Save your API Key first before initiating OAuth." },
         { status: 400 }
@@ -54,7 +65,7 @@ export async function GET(request: NextRequest) {
       case "upstox": {
         const params = new URLSearchParams({
           response_type: "code",
-          client_id: connection.api_key,
+          client_id: clientId,
           redirect_uri: REDIRECT_URI,
           state,
         });
@@ -64,7 +75,7 @@ export async function GET(request: NextRequest) {
 
       case "zerodha": {
         const params = new URLSearchParams({
-          api_key: connection.api_key,
+          api_key: clientId,
           v: "3",
         });
         authUrl = `https://kite.zerodha.com/connect/login?${params.toString()}`;

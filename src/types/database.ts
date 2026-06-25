@@ -5,6 +5,7 @@ export interface Profile {
   avatar_url: string | null;
   phone_number: string | null;
   virtual_balance: number;
+  auto_square_off?: boolean;
   created_at: string;
   updated_at: string | null;
 }
@@ -235,6 +236,8 @@ export interface Position {
   target: number | null;
   alert_price: number | null;
   trail_amount: number | null;
+  // Server-side trailing-stop ratchet (peak for long, trough for short).
+  trail_peak: number | null;
   targets: { price: number; qty: number }[] | null;
   opened_at: string;
   closed_at: string | null;
