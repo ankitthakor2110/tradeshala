@@ -1,86 +1,104 @@
 import { NextRequest } from "next/server";
+import { DHAN_UNDERLYING } from "@/lib/market-data/option-chain";
 
-function getNextThursday(from: Date): Date {
-  const d = new Date(from);
-  const day = d.getDay();
-  const daysUntilThursday = (4 - day + 7) % 7 || 7;
-  d.setDate(d.getDate() + daysUntilThursday);
-  return d;
-}
+// Expiry weekday after SEBI's 2025 realignment: NSE index options expire on
+// Tuesday, BSE Sensex on Thursday. (JS getUTCDay: Sun=0 … Tue=2, Thu=4.)
+const EXPIRY_WEEKDAY: Record<string, number> = { NSE: 2, BSE: 4 };
+// Only NIFTY (NSE) and SENSEX (BSE) still list weekly options. BANKNIFTY and
+// FINNIFTY became monthly-only after the Nov-2024 weekly-options rationalisation.
+const WEEKLY_SYMBOLS = new Set(["NIFTY", "SENSEX"]);
 
-function getLastThursdayOfMonth(year: number, month: number): Date {
-  const lastDay = new Date(year, month + 1, 0);
-  const day = lastDay.getDay();
-  const diff = (day - 4 + 7) % 7;
-  lastDay.setDate(lastDay.getDate() - diff);
-  return lastDay;
+// "Today" pinned to IST and rebuilt in UTC, so all weekday math below is stable
+// regardless of where the server runs. Holiday roll-back (expiry → previous
+// trading day) is not modeled here — live providers give the authoritative
+// dates; this generator is only the offline fallback.
+function todayIST(): Date {
+  const [y, m, d] = new Date()
+    .toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })
+    .split("-")
+    .map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
 }
 
 function formatDate(d: Date): string {
   return d.toISOString().split("T")[0];
 }
 
-function generateWeeklyExpiries(from: Date, count: number): string[] {
+// First occurrence of `weekday` on or after `from`.
+function nextWeekday(from: Date, weekday: number): Date {
+  const d = new Date(from);
+  d.setUTCDate(d.getUTCDate() + ((weekday - d.getUTCDay() + 7) % 7));
+  return d;
+}
+
+// Last `weekday` of the given month (month is 0-based).
+function lastWeekdayOfMonth(year: number, month: number, weekday: number): Date {
+  const d = new Date(Date.UTC(year, month + 1, 0)); // last calendar day of month
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() - weekday + 7) % 7));
+  return d;
+}
+
+function generateWeeklyExpiries(from: Date, weekday: number, count: number): string[] {
   const expiries: string[] = [];
-  let current = getNextThursday(from);
+  let current = nextWeekday(from, weekday);
 
   for (let i = 0; i < count; i++) {
     expiries.push(formatDate(current));
     current = new Date(current);
-    current.setDate(current.getDate() + 7);
+    current.setUTCDate(current.getUTCDate() + 7);
   }
 
   return expiries;
 }
 
-function generateMonthlyExpiries(from: Date, count: number): string[] {
+function generateMonthlyExpiries(from: Date, weekday: number, count: number): string[] {
   const expiries: string[] = [];
-  let year = from.getFullYear();
-  let month = from.getMonth();
+  let year = from.getUTCFullYear();
+  let month = from.getUTCMonth();
 
-  for (let i = 0; i < count; i++) {
-    const lastThurs = getLastThursdayOfMonth(year, month);
-    if (lastThurs >= from) {
-      expiries.push(formatDate(lastThurs));
-    }
+  while (expiries.length < count) {
+    const last = lastWeekdayOfMonth(year, month, weekday);
+    if (last >= from) expiries.push(formatDate(last));
     month++;
     if (month > 11) {
       month = 0;
       year++;
     }
-    if (expiries.length < count) {
-      const next = getLastThursdayOfMonth(year, month);
-      if (!expiries.includes(formatDate(next))) {
-        expiries.push(formatDate(next));
-      }
-    }
   }
 
-  return expiries.slice(0, count);
+  return expiries;
 }
 
 async function fetchDhanExpiries(symbol: string): Promise<string[] | null> {
   const token = process.env.DHAN_ACCESS_TOKEN;
   const clientId = process.env.DHAN_CLIENT_ID;
-  if (!token || !clientId || token.startsWith("your_")) return null;
+  const underlying = DHAN_UNDERLYING[symbol];
+  if (!token || !clientId || token.startsWith("your_") || !underlying) return null;
 
   try {
-    const res = await fetch(
-      `https://api.dhan.co/v2/optionchain/expiry?symbol=${encodeURIComponent(symbol)}`,
-      {
-        headers: {
-          "access-token": token,
-          "client-id": clientId,
-          Accept: "application/json",
-        },
-      }
-    );
+    const res = await fetch("https://api.dhan.co/v2/optionchain/expirylist", {
+      method: "POST",
+      headers: {
+        "access-token": token,
+        "client-id": clientId,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        UnderlyingScrip: underlying.scrip,
+        UnderlyingSeg: underlying.seg,
+      }),
+    });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[expiries] Dhan ${symbol}: HTTP ${res.status}`);
+      return null;
+    }
     const data = await res.json();
     const expiries: string[] = data?.data ?? [];
     return expiries.length > 0 ? expiries : null;
-  } catch {
+  } catch (e) {
+    console.warn(`[expiries] Dhan ${symbol} fetch failed:`, e);
     return null;
   }
 }
@@ -110,7 +128,10 @@ async function fetchUpstoxExpiries(symbol: string): Promise<string[] | null> {
       }
     );
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[expiries] Upstox ${symbol}: HTTP ${res.status}`);
+      return null;
+    }
     const data = await res.json();
     const contracts = data?.data as Record<string, unknown>[] | undefined;
     if (!contracts) return null;
@@ -149,10 +170,15 @@ export async function GET(request: NextRequest) {
       return Response.json({ expiries: upstoxExpiries, source: "upstox" });
     }
 
-    // Generate mock expiries
-    const now = new Date();
-    const weekly = generateWeeklyExpiries(now, 4);
-    const monthly = generateMonthlyExpiries(now, 3);
+    // Generate mock expiries on the correct weekday for this underlying's
+    // exchange. Weeklies only for symbols that still list them.
+    const exchange = symbol === "SENSEX" ? "BSE" : "NSE";
+    const weekday = EXPIRY_WEEKDAY[exchange];
+    const now = todayIST();
+    const weekly = WEEKLY_SYMBOLS.has(symbol)
+      ? generateWeeklyExpiries(now, weekday, 4)
+      : [];
+    const monthly = generateMonthlyExpiries(now, weekday, 3);
 
     // Merge and deduplicate
     const all = [...new Set([...weekly, ...monthly])].sort();

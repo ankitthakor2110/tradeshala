@@ -9,21 +9,22 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 const IV_HISTORY_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"];
 
-// Nearest weekly (Thursday) expiry, the contract this app keys on.
-function nearestThursday(): string {
-  const d = new Date();
-  const add = (4 - d.getDay() + 7) % 7; // 0 when today is Thursday
-  d.setDate(d.getDate() + add);
-  return d.toISOString().split("T")[0];
-}
-
 function istDate(): string {
   // en-CA renders YYYY-MM-DD; pin to IST so the trading day is correct.
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
+// Nearest weekly NSE expiry — Tuesday since SEBI's 2025 realignment — computed
+// off the IST calendar date so the contract key matches what the chain APIs use.
+function nearestWeeklyExpiry(): string {
+  const [y, m, d] = istDate().split("-").map(Number);
+  const base = new Date(Date.UTC(y, m - 1, d));
+  base.setUTCDate(base.getUTCDate() + ((2 - base.getUTCDay() + 7) % 7)); // Tue=2
+  return base.toISOString().split("T")[0];
+}
+
 export async function recordIvHistoryOnce(admin: Admin): Promise<number> {
-  const expiry = nearestThursday();
+  const expiry = nearestWeeklyExpiry();
   const capturedOn = istDate();
   const rows: Record<string, unknown>[] = [];
 

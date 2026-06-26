@@ -17,72 +17,109 @@ export const STRIKE_GAPS: Record<string, number> = {
   NIFTY: 50,
   BANKNIFTY: 100,
   FINNIFTY: 50,
+  MIDCPNIFTY: 25,
   SENSEX: 100,
 };
 
+// Dhan underlying identifiers (security id + exchange segment) for the option
+// chain APIs. NSE indices live in the IDX_I segment. SENSEX is intentionally
+// omitted so it falls through to Upstox — its Dhan scrip/segment hasn't been
+// verified against the instrument master.
+export const DHAN_UNDERLYING: Record<string, { scrip: number; seg: string }> = {
+  NIFTY: { scrip: 13, seg: "IDX_I" },
+  BANKNIFTY: { scrip: 25, seg: "IDX_I" },
+  FINNIFTY: { scrip: 27, seg: "IDX_I" },
+  MIDCPNIFTY: { scrip: 442, seg: "IDX_I" },
+};
+
+interface DhanLeg {
+  last_price?: number;
+  oi?: number;
+  volume?: number;
+  implied_volatility?: number;
+  top_bid_price?: number;
+  top_ask_price?: number;
+  greeks?: { delta?: number; gamma?: number; theta?: number; vega?: number };
+}
+
 // --- DhanHQ ---
+// v2 Option Chain API: POST with a JSON body keyed on the underlying's security
+// id; the chain comes back as data.oc, an object mapping strike → { ce, pe }.
 async function fetchDhan(symbol: string, expiry: string): Promise<ChainResponse | null> {
   const token = process.env.DHAN_ACCESS_TOKEN;
   const clientId = process.env.DHAN_CLIENT_ID;
-  if (!token || !clientId || token.startsWith("your_")) return null;
+  const underlying = DHAN_UNDERLYING[symbol];
+  if (!token || !clientId || token.startsWith("your_") || !underlying) return null;
 
   try {
-    const res = await fetch(
-      `https://api.dhan.co/v2/optionchain?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiry)}`,
-      {
-        headers: {
-          "access-token": token,
-          "client-id": clientId,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-      }
-    );
-
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!data?.data) return null;
-
-    const underlying = data.data.underlyingValue ?? data.data.underlying_price ?? 0;
-    const gap = STRIKE_GAPS[symbol] ?? 50;
-    const atm = Math.round(underlying / gap) * gap;
-
-    const rawChain = data.data.optionChain ?? data.data.chain ?? [];
-    const chain: OptionChainData[] = rawChain.map((row: Record<string, unknown>) => {
-      const ceLtp = (row.ce_ltp as number) ?? ((row.ce as Record<string, number>)?.ltp) ?? 0;
-      const peLtp = (row.pe_ltp as number) ?? ((row.pe as Record<string, number>)?.ltp) ?? 0;
-      const ceBid = (row.ce_bid as number) ?? ((row.ce as Record<string, number>)?.bid) ?? 0;
-      const ceAsk = (row.ce_ask as number) ?? ((row.ce as Record<string, number>)?.ask) ?? 0;
-      const peBid = (row.pe_bid as number) ?? ((row.pe as Record<string, number>)?.bid) ?? 0;
-      const peAsk = (row.pe_ask as number) ?? ((row.pe as Record<string, number>)?.ask) ?? 0;
-      const ceOi = (row.ce_oi as number) ?? ((row.ce as Record<string, number>)?.oi) ?? 0;
-      const peOi = (row.pe_oi as number) ?? ((row.pe as Record<string, number>)?.oi) ?? 0;
-      return {
-        strike_price: (row.strikePrice as number) ?? (row.strike_price as number) ?? 0,
-        ce: {
-          ltp: ceLtp, change: 0, changePercent: 0,
-          bid: ceBid, ask: ceAsk, bidAskSpread: ceAsk - ceBid,
-          oi: ceOi, oiChange: 0, oiChangePercent: 0,
-          volume: (row.ce_volume as number) ?? ((row.ce as Record<string, number>)?.volume) ?? 0,
-          iv: (row.ce_iv as number) ?? ((row.ce as Record<string, number>)?.iv) ?? 0,
-          delta: 0, gamma: 0, theta: 0, vega: 0,
-        },
-        pe: {
-          ltp: peLtp, change: 0, changePercent: 0,
-          bid: peBid, ask: peAsk, bidAskSpread: peAsk - peBid,
-          oi: peOi, oiChange: 0, oiChangePercent: 0,
-          volume: (row.pe_volume as number) ?? ((row.pe as Record<string, number>)?.volume) ?? 0,
-          iv: (row.pe_iv as number) ?? ((row.pe as Record<string, number>)?.iv) ?? 0,
-          delta: 0, gamma: 0, theta: 0, vega: 0,
-        },
-        pcr: ceOi > 0 ? Math.round((peOi / ceOi) * 100) / 100 : 0,
-        totalCeOI: 0,
-        totalPeOI: 0,
-      };
+    const res = await fetch("https://api.dhan.co/v2/optionchain", {
+      method: "POST",
+      headers: {
+        "access-token": token,
+        "client-id": clientId,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        UnderlyingScrip: underlying.scrip,
+        UnderlyingSeg: underlying.seg,
+        Expiry: expiry,
+      }),
     });
 
-    return { symbol, expiry, underlyingPrice: underlying, atmStrike: atm, chain, source: "dhan" };
-  } catch {
+    if (!res.ok) {
+      console.warn(`[option-chain] Dhan ${symbol} ${expiry}: HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const oc = data?.data?.oc as Record<string, { ce?: DhanLeg; pe?: DhanLeg }> | undefined;
+    if (!oc) return null;
+
+    const underlyingPrice = (data.data.last_price as number) ?? 0;
+    const gap = STRIKE_GAPS[symbol] ?? 50;
+    const atm = Math.round(underlyingPrice / gap) * gap;
+
+    const leg = (l?: DhanLeg) => ({
+      ltp: l?.last_price ?? 0,
+      bid: l?.top_bid_price ?? 0,
+      ask: l?.top_ask_price ?? 0,
+      oi: l?.oi ?? 0,
+      volume: l?.volume ?? 0,
+      iv: l?.implied_volatility ?? 0,
+      g: l?.greeks ?? {},
+    });
+
+    const chain: OptionChainData[] = Object.entries(oc)
+      .map(([strike, row]) => {
+        const c = leg(row.ce);
+        const p = leg(row.pe);
+        return {
+          strike_price: Math.round(parseFloat(strike)),
+          ce: {
+            ltp: c.ltp, change: 0, changePercent: 0,
+            bid: c.bid, ask: c.ask, bidAskSpread: c.ask - c.bid,
+            oi: c.oi, oiChange: 0, oiChangePercent: 0,
+            volume: c.volume, iv: c.iv,
+            delta: c.g.delta ?? 0, gamma: c.g.gamma ?? 0, theta: c.g.theta ?? 0, vega: c.g.vega ?? 0,
+          },
+          pe: {
+            ltp: p.ltp, change: 0, changePercent: 0,
+            bid: p.bid, ask: p.ask, bidAskSpread: p.ask - p.bid,
+            oi: p.oi, oiChange: 0, oiChangePercent: 0,
+            volume: p.volume, iv: p.iv,
+            delta: p.g.delta ?? 0, gamma: p.g.gamma ?? 0, theta: p.g.theta ?? 0, vega: p.g.vega ?? 0,
+          },
+          pcr: c.oi > 0 ? Math.round((p.oi / c.oi) * 100) / 100 : 0,
+          totalCeOI: 0,
+          totalPeOI: 0,
+        };
+      })
+      .filter((r) => r.strike_price > 0)
+      .sort((a, b) => a.strike_price - b.strike_price);
+
+    return { symbol, expiry, underlyingPrice, atmStrike: atm, chain, source: "dhan" };
+  } catch (e) {
+    console.warn(`[option-chain] Dhan ${symbol} fetch failed:`, e);
     return null;
   }
 }
@@ -108,7 +145,10 @@ async function fetchUpstox(symbol: string, expiry: string): Promise<ChainRespons
       { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
     );
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[option-chain] Upstox ${symbol} ${expiry}: HTTP ${res.status}`);
+      return null;
+    }
     const data = await res.json();
     if (!data?.data) return null;
 
@@ -157,7 +197,8 @@ async function fetchUpstox(symbol: string, expiry: string): Promise<ChainRespons
     });
 
     return { symbol, expiry, underlyingPrice: underlying, atmStrike: atm, chain, source: "upstox" };
-  } catch {
+  } catch (e) {
+    console.warn(`[option-chain] Upstox ${symbol} fetch failed:`, e);
     return null;
   }
 }
