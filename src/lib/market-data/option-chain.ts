@@ -1,4 +1,5 @@
 import type { OptionChainData } from "@/types/database";
+import { getSharedUpstoxToken } from "@/lib/market-data/upstox";
 
 // Shared server-side option-chain fetch (Dhan → Upstox → mock). Used by the
 // /api/trade/option-chain route, the GTT executor, and the IV-history writer so
@@ -126,8 +127,10 @@ async function fetchDhan(symbol: string, expiry: string): Promise<ChainResponse 
 
 // --- Upstox ---
 async function fetchUpstox(symbol: string, expiry: string): Promise<ChainResponse | null> {
-  const token = process.env.UPSTOX_ACCESS_TOKEN;
-  if (!token || token.startsWith("your_")) return null;
+  // Shared DB token (set by the daily OAuth login), env fallback — same resolver
+  // the snapshot/live-quotes path uses, so a reconnect reaches the chain too.
+  const token = await getSharedUpstoxToken();
+  if (!token) return null;
 
   const instrumentMap: Record<string, string> = {
     NIFTY: "NSE_INDEX|Nifty 50",

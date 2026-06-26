@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { getSharedUpstoxToken } from "@/lib/market-data/upstox";
 
 export const dynamic = "force-dynamic";
 
@@ -31,8 +32,8 @@ const INDEX_INSTRUMENT_KEYS: Record<string, string> = {
 const ALLOWED_INTERVALS = new Set(["1minute", "30minute"]);
 
 async function fetchUpstox(symbol: string, interval: string): Promise<CandlesResponse | null> {
-  const token = process.env.UPSTOX_ACCESS_TOKEN;
-  if (!token || token.startsWith("your_")) return null;
+  const token = await getSharedUpstoxToken();
+  if (!token) return null;
 
   const instrumentKey = INDEX_INSTRUMENT_KEYS[symbol];
   if (!instrumentKey) return null;

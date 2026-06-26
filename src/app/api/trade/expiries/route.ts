@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { DHAN_UNDERLYING } from "@/lib/market-data/option-chain";
+import { getSharedUpstoxToken } from "@/lib/market-data/upstox";
 
 // Expiry weekday after SEBI's 2025 realignment: NSE index options expire on
 // Tuesday, BSE Sensex on Thursday. (JS getUTCDay: Sun=0 … Tue=2, Thu=4.)
@@ -104,8 +105,8 @@ async function fetchDhanExpiries(symbol: string): Promise<string[] | null> {
 }
 
 async function fetchUpstoxExpiries(symbol: string): Promise<string[] | null> {
-  const token = process.env.UPSTOX_ACCESS_TOKEN;
-  if (!token || token.startsWith("your_")) return null;
+  const token = await getSharedUpstoxToken();
+  if (!token) return null;
 
   const instrumentMap: Record<string, string> = {
     NIFTY: "NSE_INDEX|Nifty 50",
