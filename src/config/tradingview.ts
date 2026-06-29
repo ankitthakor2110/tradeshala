@@ -35,6 +35,26 @@ export const TV_WEBHOOK_CONFIG = {
   allowReverse: envBool("ALLOW_REVERSE"),
   timezone: process.env.TIMEZONE ?? "Asia/Kolkata",
 
+  // --- Trade-engine execution (optional) ---
+  // When true, each signal ALSO places a paper order in the trade simulator (in
+  // addition to the tv_* ledger): entry → BUY the ATM option (CALL for long, PUT
+  // for short, or the payload's option_type) at the nearest expiry; exit → close
+  // it. Off by default — the ledger always runs regardless of this flag.
+  engineExecution: envBool("TV_ENGINE_EXECUTION"),
+  // The simulator account these orders execute into (webhooks have no session).
+  // Resolved to a user via profiles.email by the service role. Defaults to the
+  // admin account when WEBHOOK_TRADE_USER_EMAIL is unset.
+  tradeUserEmail:
+    process.env.WEBHOOK_TRADE_USER_EMAIL?.trim() ||
+    process.env.ADMIN_EMAIL?.trim() ||
+    null,
+  // Refuse engine execution when the option chain only resolves to MOCK prices
+  // (live providers down / token expired) — so simulator fills are never booked
+  // at fabricated premiums. Default ON; set TV_ENGINE_REQUIRE_LIVE=false to allow
+  // mock fills (e.g. for offline testing).
+  engineRequireLive:
+    (process.env.TV_ENGINE_REQUIRE_LIVE ?? "true").trim().toLowerCase() !== "false",
+
   // --- Security ---
   // Optional IP allowlist. Empty = OFF (dev default). TradingView's published
   // webhook IPs: 52.89.214.238, 34.212.75.30, 52.32.178.7, 54.218.53.128.

@@ -1,20 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import {
+  acquireQuotes,
+  onQuotesChange,
+  isQuotesLive,
+  getLiveQuote,
+  primeQuotes,
+} from "@/lib/supabase/realtime-quotes";
 import type { LiveQuote } from "@/types/database";
 
 export type LiveQuotesMap = Record<string, LiveQuote>;
 
-let channelSeq = 0;
-
 /**
- * Subscribes to live price updates for the given display symbols via Supabase
- * Realtime. The frontend updates automatically as the server-side snapshot
- * writer upserts into `live_quotes` — no client-side polling.
- *
- * The streamed universe is small, so we subscribe to the whole table and
- * filter to the requested symbols on the client.
+ * Live prices for the given display symbols. Reads from the shared Realtime
+ * store (one channel for all price subscriptions — see realtime-quotes.ts), so
+ * the frontend updates automatically as the snapshot/stream writers upsert into
+ * `live_quotes`. No client-side polling.
  *
  * @returns `quotes` keyed by symbol, and `isLive` (Realtime channel connected).
  */
@@ -26,52 +28,40 @@ export function useLiveQuotes(symbols: string[]): {
   const key = [...symbols].sort().join("|");
   const [quotes, setQuotes] = useState<LiveQuotesMap>({});
   const [isLive, setIsLive] = useState(false);
-  const wantedRef = useRef<Set<string>>(new Set());
+  const wantedRef = useRef<string[]>([]);
+
+  // Keep the shared channel open while any quote hook is mounted.
+  useEffect(() => acquireQuotes(), []);
 
   useEffect(() => {
-    const wanted = new Set(key ? key.split("|") : []);
+    const wanted = key ? key.split("|") : [];
     wantedRef.current = wanted;
-
-    if (wanted.size === 0) {
-      setQuotes({});
-      setIsLive(false);
-      return;
-    }
-
-    const supabase = createClient();
     let active = true;
 
-    // One-time fetch of current rows for first paint.
-    (async () => {
-      const { data } = await supabase
-        .from("live_quotes")
-        .select("*")
-        .in("symbol", Array.from(wanted))
-        .returns<LiveQuote[]>();
-      if (!active || !data) return;
-      const next: LiveQuotesMap = {};
-      for (const row of data) next[row.symbol] = row;
-      setQuotes((prev) => ({ ...prev, ...next }));
-    })();
-
-    const channel = supabase
-      .channel(`live_quotes_${channelSeq++}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "live_quotes" },
-        (payload) => {
-          const row = payload.new as LiveQuote;
-          if (!row?.symbol || !wantedRef.current.has(row.symbol)) return;
-          setQuotes((prev) => ({ ...prev, [row.symbol]: row }));
+    // Rebuild this hook's slice from the store; bail the re-render when nothing
+    // it cares about changed (so an unrelated symbol's tick is a no-op here).
+    const recompute = () => {
+      if (!active) return;
+      setQuotes((prev) => {
+        const next: LiveQuotesMap = {};
+        for (const s of wantedRef.current) {
+          const q = getLiveQuote(s);
+          if (q) next[s] = q;
         }
-      )
-      .subscribe((status) => {
-        if (active) setIsLive(status === "SUBSCRIBED");
+        const pk = Object.keys(prev);
+        const nk = Object.keys(next);
+        if (pk.length === nk.length && nk.every((k) => prev[k] === next[k])) return prev;
+        return next;
       });
+      setIsLive(isQuotesLive());
+    };
+
+    const unsub = onQuotesChange(recompute);
+    void primeQuotes(wanted).then(() => recompute());
 
     return () => {
       active = false;
-      supabase.removeChannel(channel);
+      unsub();
     };
   }, [key]);
 

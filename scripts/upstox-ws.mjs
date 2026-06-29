@@ -121,29 +121,145 @@ async function flush() {
 }
 setInterval(flush, FLUSH_MS);
 
+// --- option streaming: dynamic subscription driven by the registry table ---
+// The trade page upserts the contracts it's viewing into
+// live_option_subscriptions; we stream the active set (requested recently) and
+// drop the rest. optionMeta maps a live key → its quote metadata.
+const optionMeta = new Map(); // instrument_key -> { symbol, expiry, strike, option_type }
+const optionPending = new Map(); // instrument_key -> row to upsert
+let optionFlushing = false;
+let subscribedOptionKeys = new Set();
+let currentWs = null;
+
+const SUB_POLL_MS = 3000; // how often we reconcile the desired option set
+const SUB_TTL_MS = 120_000; // a registry row is "active" if requested this recently
+                            // (generous so a backgrounded tab — whose heartbeat
+                            // is throttled by the browser — doesn't get dropped)
+const MAX_OPTION_SUBS = 100; // hard cap on streamed contracts
+
+async function flushOptions() {
+  if (optionFlushing || optionPending.size === 0) return;
+  optionFlushing = true;
+  const rows = [...optionPending.values()];
+  optionPending.clear();
+  try {
+    const { error } = await supabase
+      .from("live_quotes")
+      .upsert(rows, { onConflict: "symbol" });
+    if (error) console.error("[ws] option upsert error:", error.message);
+  } catch (e) {
+    console.error("[ws] option flush failed:", e.message);
+  } finally {
+    optionFlushing = false;
+  }
+}
+setInterval(flushOptions, FLUSH_MS);
+
+async function reconcileOptionSubs() {
+  if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+  const since = new Date(Date.now() - SUB_TTL_MS).toISOString();
+  const { data, error } = await supabase
+    .from("live_option_subscriptions")
+    .select("instrument_key, symbol, expiry, strike, option_type")
+    .gte("requested_at", since)
+    .order("requested_at", { ascending: false })
+    .limit(MAX_OPTION_SUBS);
+  if (error) {
+    console.error("[ws] subscription read error:", error.message);
+    return;
+  }
+
+  const desired = new Set();
+  optionMeta.clear();
+  for (const r of data ?? []) {
+    desired.add(r.instrument_key);
+    optionMeta.set(r.instrument_key, {
+      symbol: r.symbol,
+      expiry: r.expiry,
+      strike: r.strike,
+      option_type: r.option_type,
+    });
+  }
+
+  const toAdd = [...desired].filter((k) => !subscribedOptionKeys.has(k));
+  const toRemove = [...subscribedOptionKeys].filter((k) => !desired.has(k));
+
+  if (toAdd.length) {
+    currentWs.send(
+      Buffer.from(
+        JSON.stringify({
+          guid: crypto.randomUUID(),
+          method: "sub",
+          data: { mode: "ltpc", instrumentKeys: toAdd },
+        })
+      )
+    );
+    console.log(`[ws] +sub ${toAdd.length} option(s)`);
+  }
+  if (toRemove.length) {
+    currentWs.send(
+      Buffer.from(
+        JSON.stringify({
+          guid: crypto.randomUUID(),
+          method: "unsub",
+          data: { mode: "ltpc", instrumentKeys: toRemove },
+        })
+      )
+    );
+    for (const k of toRemove) optionPending.delete(k);
+    console.log(`[ws] -unsub ${toRemove.length} option(s)`);
+  }
+  subscribedOptionKeys = desired;
+}
+setInterval(() => {
+  reconcileOptionSubs().catch((e) => console.error("[ws] reconcile failed:", e.message));
+}, SUB_POLL_MS);
+
 function onFeed(decoded) {
   const feeds = decoded?.feeds;
   if (!feeds) return;
   const nowIso = new Date().toISOString();
   for (const [key, feed] of Object.entries(feeds)) {
-    const meta = SYMBOL_BY_KEY.get(key);
-    if (!meta) continue;
     const ltpc = extractLtpc(feed);
     if (!ltpc || typeof ltpc.ltp !== "number") continue;
     const ltp = ltpc.ltp;
     const prevClose = typeof ltpc.cp === "number" && ltpc.cp > 0 ? ltpc.cp : ltp;
     const change = ltp - prevClose;
-    pending.set(meta.symbol, {
-      symbol: meta.symbol,
-      exchange: meta.exchange,
-      ltp,
-      prev_close: prevClose,
-      change,
-      change_percent: prevClose ? (change / prevClose) * 100 : 0,
-      volume: 0,
-      ts: nowIso,
-      updated_at: nowIso,
-    });
+    const changePct = prevClose ? (change / prevClose) * 100 : 0;
+
+    const idx = SYMBOL_BY_KEY.get(key);
+    if (idx) {
+      pending.set(idx.symbol, {
+        symbol: idx.symbol,
+        exchange: idx.exchange,
+        ltp,
+        prev_close: prevClose,
+        change,
+        change_percent: changePct,
+        volume: 0,
+        ts: nowIso,
+        updated_at: nowIso,
+      });
+      continue;
+    }
+
+    // Option contract (subscribed dynamically from the registry). Option ticks
+    // ride the live_quotes table, keyed by the instrument_key, so they fan out
+    // on the ONE reliable Realtime channel (see src/lib/supabase/realtime-quotes).
+    const opt = optionMeta.get(key);
+    if (opt) {
+      optionPending.set(key, {
+        symbol: key,
+        exchange: opt.symbol === "SENSEX" ? "BFO" : "NFO",
+        ltp,
+        prev_close: prevClose,
+        change,
+        change_percent: changePct,
+        volume: 0,
+        ts: nowIso,
+        updated_at: nowIso,
+      });
+    }
   }
 }
 
@@ -171,6 +287,10 @@ async function connect() {
 
   ws.on("open", () => {
     reconnectDelay = 2000;
+    currentWs = ws;
+    // Fresh socket has no server-side subs — clear our mirror so the option
+    // reconciler re-subscribes the active registry set on its next tick.
+    subscribedOptionKeys = new Set();
     console.log("[ws] connected; subscribing to", INSTRUMENTS.map((i) => i.symbol).join(", "));
     const sub = {
       guid: crypto.randomUUID(),
@@ -190,6 +310,7 @@ async function connect() {
   });
 
   ws.on("close", (code) => {
+    if (currentWs === ws) currentWs = null;
     console.warn(`[ws] closed (${code}); reconnecting in ${reconnectDelay / 1000}s`);
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30_000);

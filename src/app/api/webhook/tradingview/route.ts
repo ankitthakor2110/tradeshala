@@ -4,10 +4,12 @@ import { TV_WEBHOOK_CONFIG } from "@/config/tradingview";
 import { validateWebhook } from "@/lib/tv/schema";
 import { secretsMatch, ipAllowed, dedupeKey } from "@/lib/tv/engine";
 import { insertLog, updateLog, isDuplicate, applySignal } from "@/lib/tv/processor";
+import { executeOnEngine } from "@/services/trade-engine.server";
 
 // ============================================================================
 // PAPER-TRADING ONLY — this endpoint records TradingView signals into the tv_*
-// ledger. It NEVER places a real broker order. No broker client is imported.
+// ledger and, when TV_ENGINE_EXECUTION is on, ALSO places a paper order in the
+// trade simulator. It NEVER places a real broker order; no broker client exists.
 // ============================================================================
 
 // Node runtime (we use node:crypto for the constant-time secret compare).
@@ -101,8 +103,19 @@ export async function POST(req: NextRequest) {
 
     // --- PROCESS (update the paper-trading ledger) ---
     const applied = await applySignal(admin, result.payload);
+
+    // --- EXECUTE in the trade simulator (only when enabled) ---
+    // The ledger is the source of truth and has already succeeded; an engine
+    // failure must not fail the webhook, so it's caught and just reported.
+    let engine = null;
+    try {
+      engine = await executeOnEngine(admin, result.payload, applied.handled);
+    } catch (e) {
+      engine = { executed: false, detail: `engine error: ${(e as Error).message}` };
+    }
+
     await updateLog(admin, logId, "processed");
-    return json({ ok: true, ...applied }, 200);
+    return json({ ok: true, ...applied, ...(engine ? { engine } : {}) }, 200);
   } catch (e) {
     const message = (e as Error).message ?? "Processing failed";
     await updateLog(admin, logId, "rejected", message).catch(() => {});

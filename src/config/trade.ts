@@ -29,7 +29,7 @@ export const TRADE_CONFIG = {
     maxSlippage: 0.1,
     // Margin blocked when writing (selling-to-open) an option, as a fraction of
     // the contract notional (strike × shares). ~10% approximates SPAN+exposure
-    // for index options (e.g. NIFTY 24000 × 50 × 0.1 ≈ ₹1.2L/lot). Paper-sim
+    // for index options (e.g. NIFTY 24000 × 65 × 0.1 ≈ ₹1.56L/lot). Paper-sim
     // estimate, not a real SPAN calc.
     shortMarginPercent: 0.1,
   },
@@ -56,11 +56,15 @@ export const TRADE_CONFIG = {
     },
   },
 
+  // Index F&O lot sizes. NSE indices reflect the revision effective Jan 2026
+  // (NIFTY 75→65, BANKNIFTY 35→30, FINNIFTY 65→60, MIDCPNIFTY 140→120); SENSEX
+  // is the BSE lot (20). Verify against the exchange before each contract cycle.
   defaultLotSizes: {
-    NIFTY: 50,
-    BANKNIFTY: 15,
-    FINNIFTY: 40,
-    SENSEX: 10,
+    NIFTY: 65,
+    BANKNIFTY: 30,
+    FINNIFTY: 60,
+    MIDCPNIFTY: 120,
+    SENSEX: 20,
   } as Record<string, number>,
 
   // Option chain strike window around ATM. The chain loads `initial` strikes on

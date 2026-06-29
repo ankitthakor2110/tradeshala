@@ -139,6 +139,21 @@ export interface LiveQuote {
   updated_at: string;
 }
 
+// Streamed option-contract LTP (WebSocket worker → live_option_quotes → Realtime).
+export interface LiveOptionQuote {
+  instrument_key: string;
+  symbol: string;
+  expiry: string;
+  strike: number;
+  option_type: "CE" | "PE";
+  ltp: number;
+  prev_close: number;
+  change: number;
+  change_percent: number;
+  ts: string | null;
+  updated_at: string;
+}
+
 export interface BrokerConnectionStatus {
   isConnected: boolean;
   brokerName: string | null;
@@ -321,6 +336,10 @@ export interface OptionChainData {
   pcr: number;
   totalCeOI: number;
   totalPeOI: number;
+  // Upstox instrument keys per leg (when sourced from Upstox) — used to register
+  // the contract for WebSocket streaming and match incoming live ticks.
+  ce_key?: string | null;
+  pe_key?: string | null;
 }
 
 export interface ChargeBreakdown {
