@@ -82,6 +82,33 @@ export async function triggerSnapshotRefresh(): Promise<boolean> {
   }
 }
 
+/**
+ * Register the option contracts currently on screen so the streaming worker
+ * subscribes to them. Fire-and-forget; called on a heartbeat by
+ * useLiveOptionQuotes.
+ */
+export async function registerOptionStream(
+  contracts: {
+    instrument_key: string;
+    symbol: string;
+    expiry: string;
+    strike: number;
+    option_type: "CE" | "PE";
+  }[]
+): Promise<boolean> {
+  if (contracts.length === 0) return false;
+  try {
+    const res = await fetch("/api/trade/option-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contracts }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function getIndicesData(): Promise<IndicesResponse | null> {
   try {
     const res = await fetch("/api/market-data/indices");
@@ -206,6 +233,35 @@ export async function getCandles(
  * chain fetch covers every held strike on that expiry. Used to overlay live P&L
  * on open option positions (premiums aren't on the Realtime underlying feed).
  */
+/**
+ * Map of "<strike>:<CE|PE>" → Upstox instrument_key for an expiry, so callers
+ * holding only (strike, side) — e.g. open option positions — can resolve the
+ * key needed to stream that contract live via useLiveOptionQuotes.
+ */
+export async function getOptionKeyMap(
+  symbol: string,
+  expiry: string | null
+): Promise<Record<string, string>> {
+  try {
+    if (!expiry) return {};
+    const res = await fetch(
+      `/api/trade/option-chain?symbol=${encodeURIComponent(symbol)}&expiry=${encodeURIComponent(expiry)}`
+    );
+    if (!res.ok) return {};
+    const data = await res.json();
+    const chain: { strike_price: number; ce_key?: string | null; pe_key?: string | null }[] =
+      data.chain ?? [];
+    const map: Record<string, string> = {};
+    for (const r of chain) {
+      if (r.ce_key) map[`${r.strike_price}:CE`] = r.ce_key;
+      if (r.pe_key) map[`${r.strike_price}:PE`] = r.pe_key;
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
 export async function getOptionLtpMap(
   symbol: string,
   expiry: string | null

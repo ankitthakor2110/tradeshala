@@ -8,11 +8,14 @@ import {
   summarizePositions,
 } from "@/services/positions.service";
 import { useLiveQuotes } from "./useLiveQuotes";
-import { getOptionLtpMap } from "@/services/market-data.service";
+import { useLiveOptionQuotes } from "./useLiveOptionQuotes";
+import { getOptionLtpMap, getOptionKeyMap } from "@/services/market-data.service";
 import type { Position, PositionSummary } from "@/types/database";
 
-// How often to refresh option premiums (not on the Realtime underlying feed).
-const OPTION_POLL_MS = 7000;
+// Fallback poll for option premiums when the WebSocket stream isn't covering a
+// contract (worker off / market closed). Streaming is primary; this is a slow
+// safety net, so it's deliberately infrequent.
+const OPTION_POLL_MS = 20000;
 
 /**
  * View model for the positions table: same fields as the DB Position, but with
@@ -149,15 +152,71 @@ export function usePositions(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the option set, not live ticks
   }, [optionKey]);
 
+  // Resolve each held option's Upstox instrument_key (from the chain) so it can
+  // be streamed live. positions store only symbol/expiry/strike/side, so we look
+  // the key up once per distinct symbol+expiry whenever the held set changes.
+  const [optionContracts, setOptionContracts] = useState<
+    { instrument_key: string; symbol: string; expiry: string; strike: number; option_type: "CE" | "PE" }[]
+  >([]);
+  const [keyByPosId, setKeyByPosId] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const opts = rawOpen.filter((p) => p.instrument_type !== "EQ" && p.expiry_date && p.strike_price != null);
+    if (opts.length === 0) {
+      setOptionContracts([]);
+      setKeyByPosId({});
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const resolve = async (attempt: number) => {
+      const groups = new Map<string, { symbol: string; expiry: string }>();
+      for (const p of opts) groups.set(`${p.symbol}|${p.expiry_date}`, { symbol: p.symbol, expiry: p.expiry_date! });
+      const entries = await Promise.all(
+        [...groups.values()].map((g) =>
+          getOptionKeyMap(g.symbol, g.expiry).then((m) => [`${g.symbol}|${g.expiry}`, m] as const)
+        )
+      );
+      if (cancelled) return;
+      const byGroup = Object.fromEntries(entries);
+      const contracts: typeof optionContracts = [];
+      const posKey: Record<string, string> = {};
+      for (const p of opts) {
+        const side: "CE" | "PE" = p.instrument_type === "PE" ? "PE" : "CE";
+        const key = byGroup[`${p.symbol}|${p.expiry_date}`]?.[`${p.strike_price}:${side}`];
+        if (!key) continue;
+        posKey[p.id] = key;
+        contracts.push({ instrument_key: key, symbol: p.symbol, expiry: p.expiry_date!, strike: p.strike_price!, option_type: side });
+      }
+      setOptionContracts(contracts);
+      setKeyByPosId(posKey);
+      // Keys come from Upstox; a mock chain (provider down) yields none. Retry a
+      // few times so streaming self-heals once live pricing returns.
+      if (contracts.length === 0 && attempt < 5) {
+        timer = setTimeout(() => resolve(attempt + 1), 5000);
+      }
+    };
+    void resolve(0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the option set
+  }, [optionKey]);
+
+  // Stream the held option contracts (registers them so the worker subscribes).
+  const { quotes: optStreamQuotes } = useLiveOptionQuotes(optionContracts);
+
   const open = useMemo<PositionView[]>(
     () =>
       rawOpen.map((p) => {
         const v = toView(p);
         const dirMul = p.direction === "SHORT" ? -1 : 1;
 
-        // Options: overlay the polled premium (not on the Realtime feed).
+        // Options: prefer the live WebSocket stream; fall back to the slow poll.
         if (p.instrument_type !== "EQ") {
-          const prem = optionPrices[p.id];
+          const streamKey = keyByPosId[p.id];
+          const streamed = streamKey ? optStreamQuotes[streamKey]?.ltp : undefined;
+          const prem = streamed ?? optionPrices[p.id];
           if (prem == null) return v;
           const unreal = dirMul * (prem - p.average_price) * p.quantity;
           return {
@@ -184,7 +243,7 @@ export function usePositions(): {
           day_pnl: dirMul * q.change * p.quantity,
         };
       }),
-    [rawOpen, quotes, optionPrices]
+    [rawOpen, quotes, optionPrices, optStreamQuotes, keyByPosId]
   );
 
   const summary = useMemo<PositionSummary>(

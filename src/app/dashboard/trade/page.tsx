@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useLiveOptionQuotes } from "@/hooks/useLiveOptionQuotes";
 import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
 import { getCurrentUser } from "@/services/auth.service";
 import { searchStocks, getStockQuote, getIndicesData, getCandles, getOptionLtp, getIvHistory, type Candle, type IvHistoryPoint } from "@/services/market-data.service";
@@ -340,12 +341,41 @@ export default function TradePage() {
     [fullChain, atmStrike, selectedSymbol, strikeRange]
   );
 
+  // Live option streaming: register the visible window's contracts so the
+  // WebSocket worker subscribes to them, then overlay the streamed LTP onto the
+  // chain so premiums tick ~1s (vs the 5s poll). Falls back to the fetched chain
+  // when nothing is streaming (worker off / non-Upstox source / market closed).
+  const streamContracts = useMemo(() => {
+    if (instrumentType === "EQ" || !selectedExpiry) return [];
+    const out: { instrument_key: string; symbol: string; expiry: string; strike: number; option_type: "CE" | "PE" }[] = [];
+    for (const r of chain) {
+      if (r.ce_key) out.push({ instrument_key: r.ce_key, symbol: selectedSymbol, expiry: selectedExpiry, strike: r.strike_price, option_type: "CE" });
+      if (r.pe_key) out.push({ instrument_key: r.pe_key, symbol: selectedSymbol, expiry: selectedExpiry, strike: r.strike_price, option_type: "PE" });
+    }
+    return out;
+  }, [chain, instrumentType, selectedExpiry, selectedSymbol]);
+  const { quotes: optQuotes, isLive: optStreamLive } = useLiveOptionQuotes(streamContracts);
+
+  const liveChain = useMemo(() => {
+    if (Object.keys(optQuotes).length === 0) return chain;
+    return chain.map((r) => {
+      const ce = r.ce_key ? optQuotes[r.ce_key] : undefined;
+      const pe = r.pe_key ? optQuotes[r.pe_key] : undefined;
+      if (!ce && !pe) return r;
+      return {
+        ...r,
+        ce: ce ? { ...r.ce, ltp: ce.ltp, change: ce.change, changePercent: ce.change_percent } : r.ce,
+        pe: pe ? { ...r.pe, ltp: pe.ltp, change: pe.change, changePercent: pe.change_percent } : r.pe,
+      };
+    });
+  }, [chain, optQuotes]);
+
   // Table view: optionally narrowed to ITM/OTM strikes for the side being traded.
   const tableChain = useMemo(() => {
-    if (moneyFilter === "all") return chain;
+    if (moneyFilter === "all") return liveChain;
     const side: "CE" | "PE" = instrumentType === "PE" ? "PE" : "CE";
-    return chain.filter((r) => moneyness(r.strike_price, atmStrike, side) === moneyFilter);
-  }, [chain, moneyFilter, instrumentType, atmStrike]);
+    return liveChain.filter((r) => moneyness(r.strike_price, atmStrike, side) === moneyFilter);
+  }, [liveChain, moneyFilter, instrumentType, atmStrike]);
 
   const canShowMore = strikeRange < TRADE_CONFIG.strikeWindow.max &&
     fullChain.length > chain.length;
@@ -441,7 +471,17 @@ export default function TradePage() {
 
   const lotSize = TRADE_CONFIG.defaultLotSizes[selectedSymbol] ?? 1;
   const isOption = instrumentType !== "EQ";
-  const currentLtp = isOption && selectedOptionLtp ? selectedOptionLtp : (quote?.last_price ?? 0);
+  // Streamed LTP for the selected contract (when the WS feed is covering it),
+  // so the ticket's current premium and the simulated fill tick live too.
+  const liveSelectedLtp = useMemo(() => {
+    if (!isOption || selectedStrike == null) return null;
+    const row = liveChain.find((r) => r.strike_price === selectedStrike);
+    const key = row ? (selectedSide === "PE" ? row.pe_key : row.ce_key) : null;
+    return key && optQuotes[key] ? optQuotes[key].ltp : null;
+  }, [isOption, selectedStrike, selectedSide, liveChain, optQuotes]);
+  const currentLtp = isOption
+    ? (liveSelectedLtp ?? selectedOptionLtp ?? 0)
+    : (quote?.last_price ?? 0);
   const effectivePrice = orderType === "LIMIT" && orderPrice ? parseFloat(orderPrice) : currentLtp;
   const totalShares = isOption ? orderQty * lotSize : orderQty;
 
@@ -961,6 +1001,15 @@ export default function TradePage() {
                           {m === "all" ? "All" : m}
                         </button>
                       ))}
+                      {optStreamLive && (
+                        <span
+                          title="Streaming live premiums over WebSocket"
+                          className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-green-500/15 text-green-400 border border-green-500/30"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                          Live
+                        </span>
+                      )}
                     </div>
                     <button onClick={() => setShowColMenu(!showColMenu)} className="text-[10px] text-gray-500 hover:text-violet-400 cursor-pointer transition-colors duration-200">Columns {"\u25BE"}</button>
                     {showColMenu && (

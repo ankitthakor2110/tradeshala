@@ -180,6 +180,8 @@ async function fetchUpstox(symbol: string, expiry: string): Promise<ChainRespons
       const peOi = peMd?.oi ?? 0;
       return {
         strike_price: (row.strike_price as number) ?? 0,
+        ce_key: (ce?.instrument_key as string) ?? null,
+        pe_key: (pe?.instrument_key as string) ?? null,
         ce: {
           ltp: ceLtp, change: 0, changePercent: 0,
           bid: ceBid, ask: ceAsk, bidAskSpread: ceAsk - ceBid,
