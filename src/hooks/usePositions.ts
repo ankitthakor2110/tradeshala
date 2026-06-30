@@ -12,10 +12,11 @@ import { useLiveOptionQuotes } from "./useLiveOptionQuotes";
 import { getOptionLtpMap, getOptionKeyMap } from "@/services/market-data.service";
 import type { Position, PositionSummary } from "@/types/database";
 
-// Fallback poll for option premiums when the WebSocket stream isn't covering a
-// contract (worker off / market closed). Streaming is primary; this is a slow
-// safety net, so it's deliberately infrequent.
-const OPTION_POLL_MS = 20000;
+// Refresh interval for option premiums. The WebSocket stream gives sub-second
+// updates when the worker is running, but it isn't guaranteed (worker off /
+// deploy pending), so we poll every 2s as the reliable baseline. Streamed
+// values still take priority when present; this keeps the page live regardless.
+const OPTION_POLL_MS = 2000;
 
 /**
  * View model for the positions table: same fields as the DB Position, but with
@@ -126,6 +127,8 @@ export function usePositions(): {
     }
     let cancelled = false;
     const poll = async () => {
+      // Don't poll a backgrounded tab — nothing to refresh on screen.
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       const groups = new Map<string, { symbol: string; expiry: string }>();
       for (const p of opts) groups.set(`${p.symbol}|${p.expiry_date}`, { symbol: p.symbol, expiry: p.expiry_date! });
       const entries = await Promise.all(
