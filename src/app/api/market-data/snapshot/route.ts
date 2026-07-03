@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isUpstoxConfigured } from "@/lib/market-data/upstox";
 import { snapshotOnce } from "@/lib/market-data/snapshot";
+import { runPendingOrdersOnce } from "@/lib/trade/pending-orders";
 import { runGttOnce } from "@/lib/trade/gtt";
 import { recordIvHistoryOnce } from "@/lib/market-data/iv-history";
 import { getMarketStatus } from "@/services/dashboard.service";
@@ -50,17 +51,21 @@ export async function GET(request: NextRequest) {
     const deadline = Date.now() + (maxDuration * 1000 - SAFETY_MARGIN_MS);
     let passes = 0;
     let lastWritten = 0;
+    let pendingActions = 0;
     let gttActions = 0;
 
     while (Date.now() < deadline && getMarketStatus()) {
       lastWritten = await snapshotOnce(admin);
+      // Fill PENDING entry orders before evaluating exits — a fresh entry can
+      // open a position GTT should then see in this same pass.
+      pendingActions += await runPendingOrdersOnce(admin).catch(() => 0);
       gttActions += await runGttOnce(admin).catch(() => 0);
       passes += 1;
       if (Date.now() + REFRESH_INTERVAL_MS >= deadline) break;
       await sleep(REFRESH_INTERVAL_MS);
     }
 
-    return Response.json({ ok: true, market: "open", passes, lastWritten, gttActions, ivRows });
+    return Response.json({ ok: true, market: "open", passes, lastWritten, pendingActions, gttActions, ivRows });
   } catch (e) {
     return Response.json(
       { ok: false, error: (e as Error).message },

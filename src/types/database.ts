@@ -201,6 +201,11 @@ export interface Order {
   price: number | null;
   trigger_price: number | null;
   status: "PENDING" | "EXECUTED" | "CANCELLED" | "REJECTED";
+  // Risk levels the user set at placement; carried on a PENDING entry order and
+  // copied onto the position when it fills. Null for MARKET (risk goes straight
+  // to the position on the immediate fill).
+  attached_stop_loss: number | null;
+  attached_target: number | null;
   executed_price: number | null;
   executed_quantity: number | null;
   executed_at: string | null;

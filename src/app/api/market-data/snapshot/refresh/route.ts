@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isUpstoxConfigured } from "@/lib/market-data/upstox";
 import { snapshotOnce } from "@/lib/market-data/snapshot";
+import { runPendingOrdersOnce } from "@/lib/trade/pending-orders";
 import { runGttOnce } from "@/lib/trade/gtt";
 import { getMarketStatus } from "@/services/dashboard.service";
 
@@ -54,12 +55,15 @@ export async function POST() {
 
   try {
     const written = await snapshotOnce(admin);
-    // Drive a server-side GTT pass too: on Hobby this is the only intraday
-    // server compute, so any open tab keeps everyone's exits firing.
+    // Drive server-side order fills + a GTT pass too: on Hobby this is the only
+    // intraday server compute, so any open tab keeps everyone's pending orders
+    // and exits firing. Fill entries before evaluating exits.
+    const pendingActions = await runPendingOrdersOnce(admin).catch(() => 0);
     const gttActions = await runGttOnce(admin).catch(() => 0);
     return Response.json({
       ok: true,
       written,
+      pendingActions,
       gttActions,
       market: getMarketStatus() ? "open" : "closed",
     });
