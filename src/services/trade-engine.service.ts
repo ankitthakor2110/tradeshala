@@ -2,7 +2,9 @@ import { createClient } from "@/lib/supabase/client";
 import { getStockQuote, getOptionLtp } from "@/services/market-data.service";
 import { getMarketStatus } from "@/services/dashboard.service";
 import { TRADE_CONFIG } from "@/config/trade";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
+  Database,
   Order,
   Position,
   OrderFormData,
@@ -11,6 +13,12 @@ import type {
 } from "@/types/database";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Either the browser client or the service-role admin client — both are
+// `SupabaseClient<Database>` and expose the same query surface. The shared
+// helpers below take this so the server-side pending-order engine can reuse
+// them (see src/lib/trade/pending-orders.ts).
+export type DbClient = SupabaseClient<Database>;
 
 type ContractKey = {
   symbol: string;
@@ -29,8 +37,8 @@ type ContractKey = {
  * the naked notional margin. Only ever reduces vs. naked — never increases. The
  * protective long must already exist (templates place longs before shorts).
  */
-async function computeShortMargin(
-  supabase: ReturnType<typeof createClient>,
+export async function computeShortMargin(
+  supabase: DbClient,
   userId: string,
   c: ContractKey,
   refPrice: number
@@ -75,8 +83,8 @@ async function computeShortMargin(
  * expiry + side), or null. Options share a `symbol`, so matching on symbol alone
  * is wrong — every open/add/close must key on the exact contract.
  */
-async function findOpenPosition(
-  supabase: ReturnType<typeof createClient>,
+export async function findOpenPosition(
+  supabase: DbClient,
   userId: string,
   c: {
     symbol: string;
@@ -379,6 +387,11 @@ export async function placeOrder(
       price: orderData.price,
       trigger_price: orderData.trigger_price,
       status: isExecuted ? "EXECUTED" : "PENDING",
+      // Carry the user's SL/target on a PENDING entry so the server-side fill
+      // engine can attach them to the position when it fills. Immediate fills
+      // apply risk straight to the position (below), so leave these null.
+      attached_stop_loss: isExecuted ? null : risk?.stop_loss ?? null,
+      attached_target: isExecuted ? null : risk?.target ?? null,
       executed_price: fill?.executed_price ?? null,
       executed_quantity: isExecuted ? orderData.quantity : null,
       executed_at: isExecuted ? new Date().toISOString() : null,
