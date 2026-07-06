@@ -4,6 +4,10 @@ export const TRADE_CONFIG = {
     subtitle: "Practice trading with virtual money",
   },
 
+  // Fresh-account virtual cash (₹10,00,000). Matches the profiles.virtual_balance
+  // DB default; the "Reset account" action restores balance to this value.
+  startingBalance: 1000000,
+
   instruments: {
     EQ: "Equity",
     CE: "Call Option",

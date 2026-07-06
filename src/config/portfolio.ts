@@ -43,5 +43,18 @@ export const portfolioConfig = {
   detailLinkLabel: "View all positions →",
   detailHref: "/dashboard/positions",
 
+  // "Reset account" — restore a fresh paper account (balance + wipe everything).
+  reset: {
+    button: "Reset account",
+    modalTitle: "Reset your paper account?",
+    warning:
+      "This restores your virtual balance to the starting amount and permanently deletes ALL open and closed positions and your entire order history. Your win-rate, P&L and equity curve reset to zero.",
+    irreversible: "This can't be undone.",
+    confirm: "Reset everything",
+    cancel: "Cancel",
+    successToast: "Account reset — fresh start!",
+    balanceLine: (amount: string) => `Virtual balance will be set to ${amount}.`,
+  },
+
   currency: "₹",
 } as const;

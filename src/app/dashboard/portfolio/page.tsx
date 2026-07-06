@@ -18,11 +18,15 @@ import {
 import { formatIndianCurrency, formatPercent } from "@/utils/format";
 import Skeleton from "@/components/ui/Skeleton";
 import ButtonLoader from "@/components/ui/ButtonLoader";
+import Modal from "@/components/ui/Modal";
+import { showToast } from "@/components/ui/Toast";
+import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { portfolioConfig as C } from "@/config/portfolio";
+import { TRADE_CONFIG } from "@/config/trade";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { usePositions, type PositionView } from "@/hooks/usePositions";
 import { useSnapshotPoller } from "@/hooks/useSnapshotPoller";
-import { getVirtualCash } from "@/services/portfolio.service";
+import { getVirtualCash, resetTradingAccount } from "@/services/portfolio.service";
 import { accountValue as calcAccountValue, allocationBuckets, buildEquityCurve } from "@/lib/portfolio/summary";
 
 type Period = (typeof C.periods)[number];
@@ -69,6 +73,8 @@ export default function PortfolioPage() {
   const [cash, setCash] = useState<number | null>(null);
   const [period, setPeriod] = useState<Period>(C.defaultPeriod);
   const [refreshing, setRefreshing] = useState(false);
+  const [showReset, setShowReset] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     if (userId) getVirtualCash(userId).then(setCash);
@@ -94,6 +100,20 @@ export default function PortfolioPage() {
     setRefreshing(false);
   };
 
+  const handleReset = async () => {
+    if (!userId) return;
+    setResetting(true);
+    const res = await resetTradingAccount(userId);
+    if (res.success) {
+      showToast(C.reset.successToast, "success");
+      setShowReset(false);
+      await Promise.all([refresh(), getVirtualCash(userId).then(setCash)]);
+    } else {
+      showToast(res.message, "error");
+    }
+    setResetting(false);
+  };
+
   if (!mounted) return null;
 
   return (
@@ -117,8 +137,43 @@ export default function PortfolioPage() {
             {refreshing ? <ButtonLoader /> : <span aria-hidden>↻</span>}
             <span className="hidden sm:inline">Refresh</span>
           </button>
+          <button
+            onClick={() => setShowReset(true)}
+            className="flex items-center justify-center gap-1.5 border border-red-500/30 text-red-400 hover:bg-red-500 hover:text-white hover:border-red-500 px-3 py-1.5 rounded-xl text-sm transition-all duration-200 cursor-pointer active:scale-95"
+          >
+            <span aria-hidden>↺</span>
+            <span className="hidden sm:inline">{C.reset.button}</span>
+          </button>
         </div>
       </div>
+
+      {/* Reset-account confirmation */}
+      <Modal isOpen={showReset} onClose={() => !resetting && setShowReset(false)} title={C.reset.modalTitle}>
+        <div className="space-y-4">
+          <p className="text-sm text-gray-300">{C.reset.warning}</p>
+          <div className="rounded-lg bg-gray-800/50 border border-gray-700 px-3 py-2 text-sm text-gray-200">
+            {C.reset.balanceLine(formatIndianCurrency(TRADE_CONFIG.startingBalance))}
+          </div>
+          <p className="text-xs font-medium text-red-400">{C.reset.irreversible}</p>
+          <div className="flex items-center justify-end gap-3 pt-1">
+            <button
+              onClick={() => setShowReset(false)}
+              disabled={resetting}
+              className={`${INTERACTION_CLASSES.secondaryButton} text-sm text-gray-300 px-4 py-2 rounded-lg`}
+            >
+              {C.reset.cancel}
+            </button>
+            <button
+              onClick={handleReset}
+              disabled={resetting}
+              className={`${INTERACTION_CLASSES.dangerButton} text-sm text-white px-4 py-2 rounded-lg flex items-center gap-2`}
+            >
+              {resetting ? <ButtonLoader /> : null}
+              {C.reset.confirm}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Overview cards */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
