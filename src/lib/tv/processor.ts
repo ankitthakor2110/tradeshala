@@ -169,9 +169,13 @@ async function closePosition(
 // Signal application
 // ---------------------------------------------------------------------------
 
-async function applyEntry(admin: Admin, p: EntryPayload): Promise<ApplyResult> {
+async function applyEntry(
+  admin: Admin,
+  p: EntryPayload,
+  allowReverse: boolean
+): Promise<ApplyResult> {
   const existing = await findOpenPosition(admin, p.strategy, p.symbol);
-  const decision = decideEntry(existing?.side ?? null, p.side, TV_WEBHOOK_CONFIG.allowReverse);
+  const decision = decideEntry(existing?.side ?? null, p.side, allowReverse);
   const openedAt = p.time ?? new Date().toISOString();
 
   if (decision.action === "ignore") {
@@ -205,6 +209,15 @@ async function applyExit(admin: Admin, p: ExitPayload): Promise<ApplyResult> {
   return { handled: "closed", reason, detail: `closed ${existing.side} @ ${p.price} (${reason})` };
 }
 
-export async function applySignal(admin: Admin, payload: WebhookPayload): Promise<ApplyResult> {
-  return payload.event === "entry" ? applyEntry(admin, payload) : applyExit(admin, payload);
+export async function applySignal(
+  admin: Admin,
+  payload: WebhookPayload,
+  opts: { allowReverse?: boolean } = {}
+): Promise<ApplyResult> {
+  // Flip model (BUY/SELL action payloads) forces reverse so an opposite signal
+  // is never silently dropped; native entry/exit payloads honor ALLOW_REVERSE.
+  const allowReverse = opts.allowReverse ?? TV_WEBHOOK_CONFIG.allowReverse;
+  return payload.event === "entry"
+    ? applyEntry(admin, payload, allowReverse)
+    : applyExit(admin, payload);
 }

@@ -60,6 +60,73 @@ export type ValidationResult =
   | { ok: true; payload: WebhookPayload }
   | { ok: false; message: string };
 
+// ---------------------------------------------------------------------------
+// Inbound normalization (raw TradingView alert -> canonical webhook shape)
+// ---------------------------------------------------------------------------
+//
+// TradingView strategy alerts can send a broker-style payload that doesn't match
+// the canonical shape above, e.g.:
+//   {"ticker":"NIFTY","exchange":"NSE","action":"BUY","price":"24455.95",
+//    "time":"1783325160000","strategy":"TriSeq_Bullish"}
+// This maps such a payload into the canonical fields BEFORE validation:
+//   - ticker            -> symbol   (only if symbol is absent)
+//   - price/sl/tp/qty    : numeric strings -> numbers
+//   - time (epoch s/ms)  -> ISO-8601 string
+//   - action BUY|SELL    -> event:"entry" + side:"long"|"short"  (flip model)
+// A payload already in canonical form (has `event`) passes through untouched
+// except for the numeric/time coercions. Unknown keys (exchange, action, ticker)
+// are left in place; the zod object schemas strip them.
+
+/** BUY / SELL -> an always-in-market entry (flip: opposite signal reverses). */
+const ACTION_TO_SIGNAL: Record<string, { event: "entry"; side: "long" | "short" }> = {
+  BUY: { event: "entry", side: "long" },
+  SELL: { event: "entry", side: "short" },
+};
+
+/** True when the raw payload used broker-style `action` instead of `event`. */
+export function isActionPayload(raw: Record<string, unknown> | null | undefined): boolean {
+  return !!raw && typeof raw.action === "string" && raw.event == null;
+}
+
+function coerceNumber(v: unknown): unknown {
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  return v;
+}
+
+/** Epoch seconds (10-digit) or milliseconds (13-digit) -> ISO string; ISO passes through. */
+function coerceTime(v: unknown): unknown {
+  if (v == null) return v;
+  // A non-numeric string is assumed to already be an ISO/parseable timestamp.
+  if (typeof v === "string" && !/^\d+$/.test(v.trim())) return v;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return v;
+  const ms = n < 1e12 ? n * 1000 : n; // <1e12 => seconds
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? v : d.toISOString();
+}
+
+/** Map a raw parsed alert into the canonical webhook shape (pure, no I/O). */
+export function normalizeInbound(raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...raw };
+
+  if (out.symbol == null && out.ticker != null) out.symbol = out.ticker;
+
+  for (const k of ["price", "sl", "tp", "qty"] as const) {
+    if (out[k] != null) out[k] = coerceNumber(out[k]);
+  }
+  if (out.time != null) out.time = coerceTime(out.time);
+
+  if (out.event == null && typeof out.action === "string") {
+    const mapped = ACTION_TO_SIGNAL[out.action.trim().toUpperCase()];
+    if (mapped) {
+      out.event = mapped.event;
+      if (out.side == null) out.side = mapped.side;
+    }
+  }
+
+  return out;
+}
+
 /** Validate a parsed JSON object. Returns a 422-ready message naming the bad field. */
 export function validateWebhook(input: unknown): ValidationResult {
   const parsed = webhookSchema.safeParse(input);

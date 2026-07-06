@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TV_WEBHOOK_CONFIG } from "@/config/tradingview";
-import { validateWebhook } from "@/lib/tv/schema";
+import { validateWebhook, normalizeInbound, isActionPayload } from "@/lib/tv/schema";
 import { secretsMatch, ipAllowed, dedupeKey } from "@/lib/tv/engine";
 import { insertLog, updateLog, isDuplicate, applySignal } from "@/lib/tv/processor";
 import { executeOnEngine } from "@/services/trade-engine.server";
+import { buildAlertText, sendTelegramAlert } from "@/lib/tv/notify";
 
 // ============================================================================
 // PAPER-TRADING ONLY — this endpoint records TradingView signals into the tv_*
@@ -52,6 +53,12 @@ export async function POST(req: NextRequest) {
     parsed = null;
   }
 
+  // Normalize broker-style TradingView payloads (ticker/action/string-price/
+  // epoch-time) into the canonical shape before dedupe + validation. Action
+  // payloads (BUY/SELL) use the flip model, so force reverse for them.
+  const fromAction = isActionPayload(parsed);
+  const normalized = parsed ? normalizeInbound(parsed) : null;
+
   // --- AUTH (before logging, so unauthenticated callers can't spam the log) ---
   const expected = process.env.WEBHOOK_SECRET;
   if (!expected) {
@@ -72,7 +79,7 @@ export async function POST(req: NextRequest) {
 
   // --- LOG raw body BEFORE processing (auth has passed) ---
   const admin = createAdminClient();
-  const key = dedupeKeyFromRaw(parsed);
+  const key = dedupeKeyFromRaw(normalized);
   const logId = await insertLog(admin, {
     content_type: contentType,
     source_ip: ip,
@@ -83,13 +90,13 @@ export async function POST(req: NextRequest) {
 
   try {
     // --- PARSE check ---
-    if (parsed === null) {
+    if (normalized === null) {
       await updateLog(admin, logId, "rejected", "Body is not valid JSON");
       return json({ ok: false, error: "Body is not valid JSON" }, 400);
     }
 
     // --- VALIDATE (strict; 422 names the bad field) ---
-    const result = validateWebhook(parsed);
+    const result = validateWebhook(normalized);
     if (!result.ok) {
       await updateLog(admin, logId, "rejected", result.message);
       return json({ ok: false, error: result.message }, 422);
@@ -102,7 +109,9 @@ export async function POST(req: NextRequest) {
     }
 
     // --- PROCESS (update the paper-trading ledger) ---
-    const applied = await applySignal(admin, result.payload);
+    const applied = await applySignal(admin, result.payload, {
+      allowReverse: fromAction ? true : undefined,
+    });
 
     // --- EXECUTE in the trade simulator (only when enabled) ---
     // The ledger is the source of truth and has already succeeded; an engine
@@ -114,8 +123,29 @@ export async function POST(req: NextRequest) {
       engine = { executed: false, detail: `engine error: ${(e as Error).message}` };
     }
 
+    // --- NOTIFY (Telegram) — only for actionable results, never fails the webhook.
+    // actionLabel is the original BUY/SELL for broker-style payloads, else the
+    // entry side / EXIT.
+    let notify = null;
+    if (applied.handled === "opened" || applied.handled === "closed" || applied.handled === "reversed") {
+      const actionLabel =
+        typeof parsed?.action === "string"
+          ? parsed.action.trim().toUpperCase()
+          : result.payload.event === "entry"
+            ? result.payload.side.toUpperCase()
+            : "EXIT";
+      try {
+        notify = await sendTelegramAlert(buildAlertText(result.payload, applied, actionLabel));
+      } catch (e) {
+        notify = { sent: false, detail: `notify error: ${(e as Error).message}` };
+      }
+    }
+
     await updateLog(admin, logId, "processed");
-    return json({ ok: true, ...applied, ...(engine ? { engine } : {}) }, 200);
+    return json(
+      { ok: true, ...applied, ...(engine ? { engine } : {}), ...(notify ? { notify } : {}) },
+      200
+    );
   } catch (e) {
     const message = (e as Error).message ?? "Processing failed";
     await updateLog(admin, logId, "rejected", message).catch(() => {});
