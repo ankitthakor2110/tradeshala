@@ -90,6 +90,66 @@ describe("normalizeInbound", () => {
     const out = normalizeInbound({ event: "exit", action: "BUY", strategy: "S", symbol: "NIFTY", price: 100 });
     expect(out.event).toBe("exit");
   });
+
+  // Option-scalper dialect — the exact payload received from the nifty-scalper bot.
+  const rawScalperPe = {
+    symbol: "NIFTY",
+    side: "BUY_PE",
+    option: "24450 PE",
+    strike: 24450,
+    spot: 24377.45,
+    entry: 24377.45,
+    sl: 24392.45,
+    target: 24347.45,
+    rr: "1:2",
+    tf: "1",
+    trigger: "ZL_TREND_FLIP",
+    time: "2026-07-07T15:21",
+    strategy_version: "nifty-scalper-1.0",
+    signal_id: "00000000-0000-0000-0000-000000000000-1783417860000-BUY_PE",
+  };
+
+  it("maps a BUY_PE scalper payload to a valid short PUT entry", () => {
+    const out = normalizeInbound(rawScalperPe);
+    expect(out.event).toBe("entry");
+    expect(out.side).toBe("short");
+    expect(out.option_type).toBe("PUT");
+    expect(out.price).toBe(24377.45); // from `entry`
+    expect(out.tp).toBe(24347.45); // from `target`
+    expect(out.sl).toBe(24392.45);
+    expect(out.strategy).toBe("nifty-scalper-1.0"); // from `strategy_version`
+    expect(out.id).toBe(rawScalperPe.signal_id); // from `signal_id` (dedupe)
+
+    const result = validateWebhook(out);
+    expect(result.ok).toBe(true);
+    if (result.ok && result.payload.event === "entry") {
+      expect(result.payload.side).toBe("short");
+      expect(result.payload.option_type).toBe("PUT");
+    }
+  });
+
+  it("maps BUY_CE to a long CALL entry", () => {
+    const out = normalizeInbound({ ...rawScalperPe, side: "BUY_CE" });
+    expect(out.side).toBe("long");
+    expect(out.option_type).toBe("CALL");
+    expect(validateWebhook(out).ok).toBe(true);
+  });
+
+  it("falls back to spot for price and trigger for strategy", () => {
+    const { entry: _entry, strategy_version: _sv, ...noEntry } = rawScalperPe;
+    void _entry;
+    void _sv;
+    const out = normalizeInbound(noEntry);
+    expect(out.price).toBe(24377.45); // from `spot`
+    expect(out.strategy).toBe("ZL_TREND_FLIP"); // from `trigger`
+    expect(validateWebhook(out).ok).toBe(true);
+  });
+
+  it("does not map SELL_PE/SELL_CE (unconfirmed close semantics)", () => {
+    const out = normalizeInbound({ ...rawScalperPe, side: "SELL_PE" });
+    expect(out.event).toBeUndefined();
+    expect(validateWebhook(out).ok).toBe(false);
+  });
 });
 
 describe("isActionPayload", () => {
@@ -102,5 +162,13 @@ describe("isActionPayload", () => {
   it("is false for canonical payloads and null", () => {
     expect(isActionPayload({ event: "entry" })).toBe(false);
     expect(isActionPayload(null)).toBe(false);
+  });
+  it("detects option-scalper BUY_CE/BUY_PE side payloads", () => {
+    expect(isActionPayload({ side: "BUY_PE" })).toBe(true);
+    expect(isActionPayload({ side: "BUY_CE" })).toBe(true);
+  });
+  it("does not treat SELL_PE or a canonical side as an action payload", () => {
+    expect(isActionPayload({ side: "SELL_PE" })).toBe(false);
+    expect(isActionPayload({ side: "long", event: "entry" })).toBe(false);
   });
 });

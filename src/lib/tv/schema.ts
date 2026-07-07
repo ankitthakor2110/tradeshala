@@ -68,14 +68,22 @@ export type ValidationResult =
 // the canonical shape above, e.g.:
 //   {"ticker":"NIFTY","exchange":"NSE","action":"BUY","price":"24455.95",
 //    "time":"1783325160000","strategy":"TriSeq_Bullish"}
+// ...or an option-scalper dialect that names its fields differently, e.g.:
+//   {"symbol":"NIFTY","side":"BUY_PE","entry":24377.45,"sl":...,"target":...,
+//    "strategy_version":"nifty-scalper-1.0","signal_id":"...","trigger":"..."}
 // This maps such a payload into the canonical fields BEFORE validation:
-//   - ticker            -> symbol   (only if symbol is absent)
-//   - price/sl/tp/qty    : numeric strings -> numbers
-//   - time (epoch s/ms)  -> ISO-8601 string
-//   - action BUY|SELL    -> event:"entry" + side:"long"|"short"  (flip model)
+//   - ticker              -> symbol   (only if symbol is absent)
+//   - entry|spot          -> price    (only if price is absent)
+//   - target              -> tp       (only if tp is absent)
+//   - strategy_version|trigger -> strategy (only if strategy is absent)
+//   - signal_id           -> id       (dedupe key; only if id is absent)
+//   - price/sl/tp/qty      : numeric strings -> numbers
+//   - time (epoch s/ms)    -> ISO-8601 string
+//   - action BUY|SELL      -> event:"entry" + side:"long"|"short"  (flip model)
+//   - side BUY_CE|BUY_PE   -> event:"entry" + side:"long"|"short" + option_type
 // A payload already in canonical form (has `event`) passes through untouched
-// except for the numeric/time coercions. Unknown keys (exchange, action, ticker)
-// are left in place; the zod object schemas strip them.
+// except for the numeric/time coercions. Unknown keys (exchange, action, ticker,
+// strike, rr, ...) are left in place; the zod object schemas strip them.
 
 /** BUY / SELL -> an always-in-market entry (flip: opposite signal reverses). */
 const ACTION_TO_SIGNAL: Record<string, { event: "entry"; side: "long" | "short" }> = {
@@ -83,9 +91,22 @@ const ACTION_TO_SIGNAL: Record<string, { event: "entry"; side: "long" | "short" 
   SELL: { event: "entry", side: "short" },
 };
 
-/** True when the raw payload used broker-style `action` instead of `event`. */
+// Option-scalper buy-to-open: BUY_CE (call) is a bullish/long bet, BUY_PE (put)
+// is bearish/short. We only ever buy-to-open, and the always-in-market flip
+// closes the prior side on reversal. SELL_CE/SELL_PE are intentionally NOT
+// mapped (their close semantics are unconfirmed) so they fail validation loudly.
+const OPTION_ENTRY_RE = /^BUY_(CE|PE)$/i;
+
+/**
+ * True when the raw payload is a broker-style / always-in-market signal (uses
+ * `action` or an option-scalper `side` like "BUY_PE" instead of `event`). The
+ * route forces `allowReverse` for these so an opposite signal reverses.
+ */
 export function isActionPayload(raw: Record<string, unknown> | null | undefined): boolean {
-  return !!raw && typeof raw.action === "string" && raw.event == null;
+  if (!raw || raw.event != null) return false;
+  if (typeof raw.action === "string") return true;
+  if (typeof raw.side === "string" && OPTION_ENTRY_RE.test(raw.side)) return true;
+  return false;
 }
 
 function coerceNumber(v: unknown): unknown {
@@ -111,10 +132,28 @@ export function normalizeInbound(raw: Record<string, unknown>): Record<string, u
 
   if (out.symbol == null && out.ticker != null) out.symbol = out.ticker;
 
+  // Option-scalper dialect: price/tp/strategy/id live under different keys.
+  if (out.price == null && out.entry != null) out.price = out.entry;
+  if (out.price == null && out.spot != null) out.price = out.spot;
+  if (out.tp == null && out.target != null) out.tp = out.target;
+  if ((out.strategy == null || out.strategy === "") && out.strategy_version != null)
+    out.strategy = out.strategy_version;
+  if ((out.strategy == null || out.strategy === "") && out.trigger != null)
+    out.strategy = out.trigger;
+  if (out.id == null && out.signal_id != null) out.id = out.signal_id;
+
   for (const k of ["price", "sl", "tp", "qty"] as const) {
     if (out[k] != null) out[k] = coerceNumber(out[k]);
   }
   if (out.time != null) out.time = coerceTime(out.time);
+
+  // Option-scalper side ("BUY_CE" / "BUY_PE") -> canonical entry + option_type.
+  if (out.event == null && typeof out.side === "string" && OPTION_ENTRY_RE.test(out.side)) {
+    const isCall = /_CE$/i.test(out.side);
+    out.event = "entry";
+    out.side = isCall ? "long" : "short";
+    if (out.option_type == null) out.option_type = isCall ? "CALL" : "PUT";
+  }
 
   if (out.event == null && typeof out.action === "string") {
     const mapped = ACTION_TO_SIGNAL[out.action.trim().toUpperCase()];
