@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TV_WEBHOOK_CONFIG } from "@/config/tradingview";
 import { validateWebhook, normalizeInbound, isActionPayload } from "@/lib/tv/schema";
@@ -16,6 +16,11 @@ import { buildAlertText, sendTelegramAlert } from "@/lib/tv/notify";
 // Node runtime (we use node:crypto for the constant-time secret compare).
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// The response returns as soon as the ledger write succeeds; engine execution and
+// Telegram run in `after()` (post-response). Give that background work headroom
+// (60s is the max on Vercel Hobby, and well within Pro) so slow provider calls
+// finish even though TradingView has already received its 200.
+export const maxDuration = 60;
 
 function json(body: unknown, status: number) {
   return Response.json(body, { status });
@@ -113,39 +118,48 @@ export async function POST(req: NextRequest) {
       allowReverse: fromAction ? true : undefined,
     });
 
-    // --- EXECUTE in the trade simulator (only when enabled) ---
-    // The ledger is the source of truth and has already succeeded; an engine
-    // failure must not fail the webhook, so it's caught and just reported.
-    let engine = null;
-    try {
-      engine = await executeOnEngine(admin, result.payload, applied.handled);
-    } catch (e) {
-      engine = { executed: false, detail: `engine error: ${(e as Error).message}` };
-    }
-
-    // --- NOTIFY (Telegram) — only for actionable results, never fails the webhook.
-    // actionLabel is the original BUY/SELL for broker-style payloads, else the
-    // entry side / EXIT.
-    let notify = null;
-    if (applied.handled === "opened" || applied.handled === "closed" || applied.handled === "reversed") {
-      const actionLabel =
-        typeof parsed?.action === "string"
-          ? parsed.action.trim().toUpperCase()
-          : result.payload.event === "entry"
-            ? result.payload.side.toUpperCase()
-            : "EXIT";
-      try {
-        notify = await sendTelegramAlert(buildAlertText(result.payload, applied, actionLabel));
-      } catch (e) {
-        notify = { sent: false, detail: `notify error: ${(e as Error).message}` };
-      }
-    }
-
+    // The ledger is the source of truth and has now succeeded, so mark the log
+    // processed and reply IMMEDIATELY. TradingView aborts webhooks that take
+    // longer than ~3s, and the engine (live option-chain fetch) + Telegram calls
+    // below can easily exceed that — so they run AFTER the response is sent.
     await updateLog(admin, logId, "processed");
-    return json(
-      { ok: true, ...applied, ...(engine ? { engine } : {}), ...(notify ? { notify } : {}) },
-      200
-    );
+
+    // actionLabel is the original BUY/SELL for broker-style payloads, else the
+    // entry side / EXIT. Computed here (needs `parsed`) and closed over by after().
+    const actionLabel =
+      typeof parsed?.action === "string"
+        ? parsed.action.trim().toUpperCase()
+        : result.payload.event === "entry"
+          ? result.payload.side.toUpperCase()
+          : "EXIT";
+    const actionable =
+      applied.handled === "opened" || applied.handled === "closed" || applied.handled === "reversed";
+    const payload = result.payload;
+
+    // --- POST-RESPONSE: engine execution + Telegram (best-effort) ---
+    // Neither may fail the webhook — the ledger already succeeded. Failures are
+    // logged to the server console (the orders/positions tables and Telegram are
+    // where outcomes are observed).
+    after(async () => {
+      try {
+        const engine = await executeOnEngine(admin, payload, applied.handled);
+        if (engine && !engine.executed) {
+          console.warn(`[tv-webhook] engine not executed: ${engine.detail}`);
+        }
+      } catch (e) {
+        console.error(`[tv-webhook] engine error:`, (e as Error).message);
+      }
+
+      if (actionable) {
+        try {
+          await sendTelegramAlert(buildAlertText(payload, applied, actionLabel));
+        } catch (e) {
+          console.error(`[tv-webhook] notify error:`, (e as Error).message);
+        }
+      }
+    });
+
+    return json({ ok: true, ...applied }, 200);
   } catch (e) {
     const message = (e as Error).message ?? "Processing failed";
     await updateLog(admin, logId, "rejected", message).catch(() => {});
