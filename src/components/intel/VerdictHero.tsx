@@ -4,7 +4,7 @@ import DataBadge from "./DataBadge";
 import { biasClasses, biasLabel } from "./style";
 import { formatIndianCurrency, formatPercent, timeAgo } from "@/utils/format";
 import { getPnLColor } from "@/utils/colors";
-import type { MarketOverview, SentimentScore, Verdict } from "@/types/intel";
+import type { EventGate, MarketOverview, SentimentScore, Verdict } from "@/types/intel";
 
 interface Props {
   verdict: Verdict;
@@ -13,9 +13,20 @@ interface Props {
   warmingUp: boolean;
   lastUpdated: string | null;
   isLive: boolean;
+  eventGate?: EventGate | null;
+  eventReason?: string | null;
 }
 
-export default function VerdictHero({ verdict, sentiment, overview, warmingUp, lastUpdated, isLive }: Props) {
+export default function VerdictHero({
+  verdict,
+  sentiment,
+  overview,
+  warmingUp,
+  lastUpdated,
+  isLive,
+  eventGate,
+  eventReason,
+}: Props) {
   const bc = biasClasses(verdict.bias);
   const controlLabel =
     verdict.control === "buyers" ? "BUYERS" : verdict.control === "sellers" ? "SELLERS" : "NEITHER SIDE";
@@ -88,6 +99,21 @@ export default function VerdictHero({ verdict, sentiment, overview, warmingUp, l
             <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
               <span className="text-amber-400">⚠</span>
               <span className="text-sm text-amber-200">{verdict.trapNote}</span>
+            </div>
+          )}
+
+          {eventGate && eventGate !== "ok" && eventReason && (
+            <div
+              className={`mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 ${
+                eventGate === "avoid"
+                  ? "border-red-500/40 bg-red-500/10"
+                  : "border-amber-500/40 bg-amber-500/10"
+              }`}
+            >
+              <span className={eventGate === "avoid" ? "text-red-400" : "text-amber-400"}>🗓</span>
+              <span className={`text-sm ${eventGate === "avoid" ? "text-red-200" : "text-amber-200"}`}>
+                {eventReason}
+              </span>
             </div>
           )}
 

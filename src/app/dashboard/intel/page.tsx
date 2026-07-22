@@ -14,6 +14,7 @@ import TradeChecklist from "@/components/intel/TradeChecklist";
 import AiInsights from "@/components/intel/AiInsights";
 import ConfigPanel from "@/components/intel/ConfigPanel";
 import NoFeedCard from "@/components/intel/NoFeedCard";
+import EventRiskPanel from "@/components/intel/EventRiskPanel";
 
 // Heavy / self-fetching sections are code-split so the decision core paints first.
 const OptionChainTable = dynamic(() => import("@/components/intel/OptionChainTable"), {
@@ -78,6 +79,8 @@ export default function MarketIntelPage() {
             warmingUp={state.warmingUp}
             lastUpdated={state.lastUpdated}
             isLive={isLive}
+            eventGate={state.eventRisk?.gate ?? null}
+            eventReason={state.eventRisk?.reason ?? null}
           />
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
@@ -89,6 +92,7 @@ export default function MarketIntelPage() {
             </div>
 
             <div className="space-y-5">
+              <EventRiskPanel eventRisk={state.eventRisk} />
               <SentimentEngine sentiment={state.sentiment!} />
               <TradeSetups setups={state.setups} threshold={config.confidenceThreshold} />
               <TradeChecklist checklist={state.checklist!} />

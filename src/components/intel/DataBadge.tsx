@@ -7,6 +7,7 @@ const STYLES: Record<DataProvenance, string> = {
   live: "text-green-400 bg-green-500/10 border-green-500/20",
   derived: "text-violet-300 bg-violet-500/10 border-violet-500/20",
   historical: "text-sky-300 bg-sky-500/10 border-sky-500/20",
+  scheduled: "text-amber-300 bg-amber-500/10 border-amber-500/20",
   none: "text-gray-400 bg-gray-500/10 border-gray-500/20",
 };
 

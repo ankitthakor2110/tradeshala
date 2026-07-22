@@ -18,6 +18,10 @@ export const INTEL_CONFIG = {
     live: { label: "LIVE", hint: "Live provider feed" },
     derived: { label: "DERIVED", hint: "Computed from live data — not exchange-reported" },
     historical: { label: "HISTORICAL", hint: "From stored daily history" },
+    scheduled: {
+      label: "SCHEDULED",
+      hint: "Upcoming from a maintained event calendar — verify against official sources",
+    },
     none: { label: "NO FEED", hint: "No data source connected yet" },
   },
 
@@ -81,6 +85,51 @@ export const INTEL_CONFIG = {
       { key: "mss", label: "Market Structure Shift", detail: "Needs SMC engine (next phase)" },
       { key: "future-oi", label: "Future OI confirms", detail: "No futures feed connected" },
     ],
+  },
+
+  // Event risk — scheduled macro / expiry calendar that gates entries around
+  // high-impact prints (RBI, FOMC, US CPI, expiry). See src/lib/intel/events.ts.
+  events: {
+    // USER-MAINTAINED macro calendar. Populate with OFFICIAL, verified datetimes
+    // in IST offset (e.g. "2026-08-13T18:00:00+05:30" for a 6:00pm-IST US CPI).
+    // Left empty by default on purpose: an unverified/guessed date would violate
+    // this dashboard's "never fabricate" rule. The weekly F&O expiry is derived
+    // automatically from the live expiry feed, so it needs no entry here.
+    calendar: [] as ReadonlyArray<{
+      id: string;
+      label: string;
+      category: string;
+      impact: "high" | "medium" | "low";
+      at: string; // ISO-8601 with IST offset
+    }>,
+    // How far the curated `calendar` has been verified through (shown to the
+    // user so a stale/empty calendar is honest). Set when you add dates.
+    coverageThrough: null as string | null,
+    windows: {
+      preWindowMin: 15, // ≤ this many min BEFORE a high-impact event → stand aside
+      postWindowMin: 5, // ≤ this many min AFTER (whipsaw settle) → stand aside
+      cautionLeadMin: 60, // ≤ this many min before → caution (size down / wait)
+      showNext: 4, // how many upcoming events to list
+      horizonMin: 4320, // 3 days — ignore events beyond this
+    },
+    // The weekly F&O expiry, auto-added from the live expiry date. High impact
+    // (pin / theta risk into the close). Time is the 15:30 IST session close.
+    expiry: {
+      label: "Weekly F&O Expiry",
+      category: "Expiry",
+      impact: "high" as "high" | "medium" | "low",
+      timeIst: "15:30",
+    },
+    labels: {
+      title: "Event Risk",
+      subtitle: "Scheduled high-impact events — stand aside around the window",
+      gate: { ok: "CLEAR", caution: "CAUTION", avoid: "STAND ASIDE" } as Record<string, string>,
+      clear: "No high-impact event window — clear to trade the setup.",
+      empty:
+        "No macro calendar configured. Add verified event dates in config/intel.ts; the weekly expiry is auto-derived.",
+    },
+    disclaimer:
+      "Event times are scheduled estimates from a maintained calendar — verify against official sources; actual release times can shift.",
   },
 
   labels: {
