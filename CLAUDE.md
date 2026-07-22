@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run ws:upstox` — Run the standalone Upstox WebSocket market-data feed script (`scripts/upstox-ws.mjs`, loads `.env.local`)
 - `npm run tv:test` — Send a test TradingView webhook payload (`scripts/tv-webhook-test.mjs`)
 
-Vitest (`vitest.config.ts`, `node` environment, `@` alias) tests **pure logic only** — it has no Next/React/DOM env. Test files are colocated as `*.test.ts` (currently `src/lib/tv/engine.test.ts`, `src/lib/tv/stats.test.ts`, `src/lib/portfolio/summary.test.ts`). Run a single file with `npx vitest run src/lib/tv/engine.test.ts`. Full verification is `npm test` + `npm run lint` + `npm run build`. Do **not** write DOM/component tests against this config — keep logic pure and testable, and put side-effecting DB/env code in the processor/service layers.
+Vitest (`vitest.config.ts`, `node` environment, `@` alias) tests **pure logic only** — it has no Next/React/DOM env. Test files are colocated as `*.test.ts` (currently `src/lib/tv/engine.test.ts`, `src/lib/tv/stats.test.ts`, `src/lib/tv/schema.test.ts`, `src/lib/tv/notify.test.ts`, `src/lib/portfolio/summary.test.ts`). Run a single file with `npx vitest run src/lib/tv/engine.test.ts`. Full verification is `npm test` + `npm run lint` + `npm run build`. Do **not** write DOM/component tests against this config — keep logic pure and testable, and put side-effecting DB/env code in the processor/service layers.
 
 ## Tech Stack
 
@@ -50,6 +50,7 @@ All user-visible strings, labels, mock data, and content live in config files un
 - `src/config/trade.ts` — instrument types, order types, simulation params (slippage, brokerage), popular stocks/indices
 - `src/config/portfolio.ts` / `positions.ts` / `watchlist.ts` / `profile.ts` / `journal.ts` — page titles, section/tab labels, table headers, and refresh intervals for the respective dashboard pages
 - `src/config/tradingview.ts` — TradingView webhook engine knobs (server-only env reads) + `/dashboard/signals` UI copy (see TradingView Webhook below)
+- `src/config/intel.ts` — all copy, thresholds, and knobs for the Market Intelligence dashboard (see Market Intelligence Dashboard below)
 - `src/config/brokers.ts` — `BROKERS` list (Upstox, Zerodha): per-broker auth type, OAuth redirect URI, credential fields, and setup steps rendered by `/dashboard/broker`
 - `src/config/admin.ts` — admin email gate + `isAdmin(email)` helper; lists admin-restricted pages
 
@@ -61,6 +62,10 @@ All user-visible strings, labels, mock data, and content live in config files un
 - **Middleware:** `src/proxy.ts` exports the middleware function; calls `src/lib/supabase/middleware.ts` to refresh sessions, protect routes (`/dashboard`, `/portfolio`, `/trades`, `/watchlist` redirect to `/login`), and gate admin-only routes (`/connection-status`) on server-side `ADMIN_EMAIL` env match (non-admins are bounced to `/dashboard?error=unauthorized`)
 - **Env vars required:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ADMIN_EMAIL` (server) and `NEXT_PUBLIC_ADMIN_EMAIL` (client, used by `useAdmin` hook) — keep them equal. Broker/market-data keys (e.g. `DHAN_*`, `UPSTOX_*`), the `SUPABASE_SERVICE_ROLE_KEY` (admin client), `CRON_SECRET` (Vercel Cron Bearer auth), `BROKER_ENCRYPTION_KEY` (broker credential encryption), and the TradingView webhook knobs (`WEBHOOK_SECRET`, `TV_ENGINE_EXECUTION`, etc.) live server-side only. See `.env.local.example`.
 - **Database types:** `src/types/database.ts` — typed `Database` interface for tables: `profiles`, `portfolios`, `trades`, `watchlist`, `holdings`, `broker_connections`. The `orders` and `positions` tables exist in the DB (used by the trade engine) but are typed inline via `Order` / `Position` interfaces rather than listed in the `Database` schema — cast inserts with `as never` when writing to them (see `trade-engine.service.ts`).
+
+### Database Migrations
+
+SQL migrations live in `supabase/migrations/`, named `<UTC-timestamp>_<slug>.sql` and applied **in filename order**. There is no automated migration runner wired into the app — migrations are **run manually by pasting into the Supabase Dashboard → SQL Editor**, and should be written to be idempotent + safe to re-run. When you add a table, column, RPC (e.g. `deduct_virtual_cash`), or RLS policy, add a new timestamped migration file; don't edit existing ones. `supabase/security/rls_audit_and_policies.sql` is a standalone audit+remediation script (RLS is the only thing isolating one user's rows from another's, since the browser/server talk to Postgres with the anon key + user session — never a service-role key except in the two trusted server writers noted above). After adding schema, update `src/types/database.ts` to match.
 
 ### API Routes (`src/app/api/`)
 
@@ -97,6 +102,7 @@ Business logic lives in `src/services/`, not in components or route handlers. Ro
 - `src/services/portfolio.service.ts` — portfolio holdings/summary aggregation (see `src/lib/portfolio/summary.ts` for the pure math).
 - `src/services/watchlist.service.ts` — watchlist CRUD against the `watchlist` table via the browser client.
 - `src/services/tradingview.service.ts` — client-side readers for the `tv_*` paper-trading ledger (open positions, closed trades) plus the admin reset call. The `tv_*` tables are RLS-select-readable by any authenticated user, so reads go direct through the browser client.
+- `src/services/intel.service.ts` — thin client-side fetchers for the Market Intelligence dashboard; reuse the existing `/api/trade/*` routes (no dedicated intel API) and return typed shapes to `useIntelData`.
 
 ### Live Market Data: Snapshot + Realtime
 
@@ -125,11 +131,21 @@ Sensitive broker credentials (`api_secret`, `access_token`, `totp_secret`) are e
 
 ### Dashboard Pages
 
-Live pages under `src/app/dashboard/`: `page.tsx` (overview), `trade` (options simulator), `positions`, `portfolio`, `watchlist`, `journal`, `signals` (TradingView ledger), `broker`, `profile`. Each has a matching config module in `src/config/`.
+Live pages under `src/app/dashboard/`: `page.tsx` (overview), `trade` (options simulator), `intel` (Market Intelligence, see below), `positions`, `portfolio`, `watchlist`, `journal`, `signals` (TradingView ledger), `broker`, `profile`. Each has a matching config module in `src/config/`.
 
 ### Options Market-Data Helpers (`src/lib/market-data/`)
 
 Beyond the provider aggregator, derivatives helpers back the trade simulator and the webhook engine: `expiries.ts` (`getExpiries`), `option-chain.ts` (`fetchOptionChain`, live-vs-mock tagged), `iv-history.ts`, `instruments.ts` / `upstox-instruments.ts` (symbol ↔ instrument-key resolution). Server-side only.
+
+### Market Intelligence Dashboard (`/dashboard/intel`)
+
+An institutional decision-support screen for NIFTY scalping — **not** a plain option chain. It composes live Upstox/Dhan data with transparently-derived signals, and **never fabricates numbers**: every panel carries a data-provenance badge (`LIVE` / `DERIVED` / `HISTORICAL` / `NO FEED` via `DataBadge`), and sections with no feed (Futures, VIX, breadth, sector) render honest placeholders (`NoFeedCard`) instead of faked values.
+
+- **Pure, unit-tested logic** in `src/lib/intel/` (no DB/env/clock): `candles.ts` (VWAP with a volume-less index fallback, ATR, opening range, trend), `optionchain.ts` (side-aware OI-buildup classification, PCR, max pain), `sentiment.ts`, `setups.ts`, `checklist.ts`, `insights.ts` (rule-based, not an LLM), `verdict.ts`, `events.ts` (event-risk gate — see below). Colocated `*.test.ts` cover these — keep new intel math here and testable.
+- **Event risk** (`events.ts` + `EventRiskPanel`): a scheduled macro/expiry calendar → a trade gate (`ok` / `caution` / `avoid`) based on how close the next high-impact event is; surfaced as its own `SCHEDULED`-badged panel and a caution strip in the verdict hero. The macro list in `INTEL_CONFIG.events.calendar` is **user-maintained and empty by default** (an unverified date would break the never-fabricate rule); the weekly F&O expiry event is **auto-derived from the live expiry feed**, so it works with no manual entry. `"clock"` is passed in (`Date.now()` from the hook at poll cadence; the panel runs its own 1s countdown so only it re-renders per second). Added a `"scheduled"` `DataProvenance` for its badge.
+- **OI change is self-computed** via in-browser session diffs, because the providers report OI change as `0`. This state lives in the client hook, not the server.
+- **Orchestration** is `src/hooks/useIntelData.ts` (client); it calls thin fetchers in `intel.service.ts` that reuse the existing `/api/trade/*` routes — there is **no** dedicated intel API route.
+- **Components** live in `src/components/intel/`; all copy, thresholds, and knobs are in `src/config/intel.ts`.
 
 ### Admin Gating
 
@@ -153,6 +169,7 @@ Types are split by domain under `src/types/`:
 - `useIsMounted.ts` — the mounted-state helper used to avoid hydration mismatches (see Hydration Rules)
 - `useLiveQuotes.ts` / `useSnapshotPoller.ts` — Realtime price subscription and the client-side snapshot poller (see Live Market Data)
 - `usePositions.ts` — derives the user's positions/P&L state from `positions.service.ts`
+- `useIntelData.ts` — orchestrates the Market Intelligence dashboard: fetches via `intel.service.ts`, runs the pure `src/lib/intel/*` math, and holds the in-browser OI-diff session state (see Market Intelligence Dashboard)
 
 ### Shared Utilities
 

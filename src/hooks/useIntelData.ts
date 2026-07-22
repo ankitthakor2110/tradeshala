@@ -29,6 +29,7 @@ import { buildSetups } from "@/lib/intel/setups";
 import { evaluateChecklist } from "@/lib/intel/checklist";
 import { buildInsights } from "@/lib/intel/insights";
 import { buildVerdict } from "@/lib/intel/verdict";
+import { buildEventList, computeEventRisk } from "@/lib/intel/events";
 
 export interface IntelConfigState {
   refreshMs: number;
@@ -80,7 +81,22 @@ const EMPTY_STATE: IntelState = {
   checklist: null,
   insights: [],
   verdict: null,
+  eventRisk: null,
 };
+
+/** Resolve the scheduled event risk (config calendar + live expiry) for `now`. */
+function resolveEventRisk(expiry: string | null) {
+  const ev = INTEL_CONFIG.events;
+  const events = buildEventList(ev.calendar, expiry, ev.expiry);
+  return computeEventRisk(
+    events,
+    Date.now(),
+    ev.windows,
+    ev.coverageThrough,
+    ev.labels.clear,
+    ev.labels.empty
+  );
+}
 
 /**
  * The Market Intelligence brain. Polls the option chain + candles on the chosen
@@ -306,7 +322,13 @@ export function useIntelData() {
   // ---- Full state (recomputes on tick; cheap once chainBlock is cached) ----
   const state = useMemo<IntelState>(() => {
     if (!rawChain || !chainBlock) {
-      return { ...EMPTY_STATE, lastUpdated, candleSource, warmingUp: pollCountRef.current < 2 };
+      return {
+        ...EMPTY_STATE,
+        lastUpdated,
+        candleSource,
+        warmingUp: pollCountRef.current < 2,
+        eventRisk: resolveEventRisk(expiry),
+      };
     }
     const marketOpen = getMarketStatus();
     const lastClose = candles.length ? candles[candles.length - 1].c : 0;
@@ -413,6 +435,7 @@ export function useIntelData() {
       checklist,
       insights,
       verdict,
+      eventRisk: resolveEventRisk(expiry),
     };
   }, [rawChain, chainBlock, candles, candleSource, liveQuote, expiry, symbol, lastUpdated, config.confidenceThreshold]);
 

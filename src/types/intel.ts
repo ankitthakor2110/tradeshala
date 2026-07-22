@@ -5,7 +5,7 @@
 // exchange truth — see CLAUDE.md "Market Intelligence Dashboard".
 
 /** Where a panel's numbers come from. Drives the honesty badge on every card. */
-export type DataProvenance = "live" | "derived" | "historical" | "none";
+export type DataProvenance = "live" | "derived" | "historical" | "scheduled" | "none";
 
 /** Candle shape shared with `/api/trade/candles` (structurally identical). */
 export interface Candle {
@@ -160,6 +160,43 @@ export interface Verdict {
   trapNote: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Event risk (scheduled macro / expiry calendar)
+// ---------------------------------------------------------------------------
+
+export type EventImpact = "high" | "medium" | "low";
+
+/** Trade-gate level derived from event proximity: clear → caution → stand aside. */
+export type EventGate = "ok" | "caution" | "avoid";
+
+/** A single scheduled market event (macro print, policy, expiry). */
+export interface MarketEvent {
+  id: string;
+  label: string; // "US CPI (YoY)"
+  category: string; // "US Macro", "RBI", "Expiry", …
+  impact: EventImpact;
+  at: string; // ISO-8601 with IST offset, e.g. "2026-07-24T15:30:00+05:30"
+}
+
+/** How close a live event window sits relative to "now". */
+export type EventWindow = "upcoming" | "watch" | "pre" | "active" | "past";
+
+export interface UpcomingEvent {
+  event: MarketEvent;
+  minutesUntil: number; // negative once the event time has passed
+  window: EventWindow;
+  gate: EventGate; // this event's own gate contribution
+}
+
+export interface EventRisk {
+  gate: EventGate; // worst gate across events currently in a window
+  reason: string; // plain-English "why" for the gate
+  driver: UpcomingEvent | null; // the event setting the gate (soonest impactful)
+  upcoming: UpcomingEvent[]; // the next few events to render (soonest first)
+  hasCalendar: boolean; // false → NO FEED placeholder
+  coverageThrough: string | null; // how far the maintained calendar extends
+}
+
 /** The fully-composed dashboard state produced by `useIntelData`. */
 export interface IntelState {
   symbol: string;
@@ -178,4 +215,5 @@ export interface IntelState {
   checklist: ChecklistResult | null;
   insights: Insight[];
   verdict: Verdict | null;
+  eventRisk: EventRisk | null;
 }
