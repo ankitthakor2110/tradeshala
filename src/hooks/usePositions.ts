@@ -31,14 +31,20 @@ export interface PositionView
 
 function toView(p: Position): PositionView {
   const ltp = p.current_price ?? p.average_price;
-  const cv = p.current_value ?? p.quantity * ltp;
   const dirMul = p.direction === "SHORT" ? -1 : 1;
+  const unreal = dirMul * (ltp - p.average_price) * p.quantity;
+  // Current Value is the mark-to-market value *to the trader*, i.e.
+  // invested + unrealized P&L. For longs this equals qty × LTP; for shorts it
+  // falls below Invested as the position loses — so the invariant
+  // `Current Value − Invested = Unrealized P&L` holds in both directions
+  // (a naive qty × LTP inverts it for shorts).
+  const cv =
+    p.status === "OPEN" ? p.total_invested + unreal : p.current_value ?? p.quantity * ltp;
   return {
     ...p,
     current_price: ltp,
     current_value: cv,
-    unrealized_pnl:
-      p.status === "OPEN" ? dirMul * (ltp - p.average_price) * p.quantity : p.unrealized_pnl,
+    unrealized_pnl: p.status === "OPEN" ? unreal : p.unrealized_pnl,
     realized_pnl: p.realized_pnl || p.pnl,
   };
 }
@@ -225,7 +231,7 @@ export function usePositions(): {
           return {
             ...v,
             current_price: prem,
-            current_value: p.quantity * prem,
+            current_value: p.total_invested + unreal,
             unrealized_pnl: unreal,
             pnl_percent: p.total_invested > 0 ? (unreal / p.total_invested) * 100 : 0,
           };
@@ -239,7 +245,7 @@ export function usePositions(): {
         return {
           ...v,
           current_price: ltp,
-          current_value: p.quantity * ltp,
+          current_value: p.total_invested + unreal,
           unrealized_pnl: unreal,
           pnl_percent: p.total_invested > 0 ? (unreal / p.total_invested) * 100 : 0,
           // Day P&L from the tick's day change (per share) × quantity; shorts gain when price falls.

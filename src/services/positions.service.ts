@@ -225,13 +225,11 @@ export function summarizePositions(
   closed: Position[]
 ): PositionSummary {
   const totalInvested = open.reduce((s, p) => s + p.total_invested, 0);
-  const currentValue = open.reduce(
-    (s, p) => s + (p.current_value ?? p.quantity * (p.current_price ?? p.average_price)),
-    0
-  );
-  // Sum per-position P&L (direction-aware) rather than currentValue - invested,
-  // which only holds for longs.
+  // Current Value is invested + direction-aware unrealized P&L (value to the
+  // trader), so `currentValue - totalInvested === openUnrealizedPnL` holds for
+  // shorts too — a naive qty × LTP inverts that identity for short positions.
   const openUnrealizedPnL = open.reduce((s, p) => s + unrealized(p), 0);
+  const currentValue = totalInvested + openUnrealizedPnL;
   const openUnrealizedPnLPercent =
     totalInvested > 0 ? (openUnrealizedPnL / totalInvested) * 100 : 0;
 
