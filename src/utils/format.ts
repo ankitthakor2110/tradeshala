@@ -56,6 +56,17 @@ export function formatDate(dateString: string | null | undefined): string {
   });
 }
 
+export function formatDateTime(dateString: string | null | undefined): string {
+  if (!dateString) return "";
+  return new Date(dateString).toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function formatOI(value: number): string {
   if (value >= 10000000) return `${(value / 10000000).toFixed(1)}Cr`;
   if (value >= 100000) return `${(value / 100000).toFixed(1)}L`;
