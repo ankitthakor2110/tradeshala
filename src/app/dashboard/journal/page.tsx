@@ -3,7 +3,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { JOURNAL_CONFIG } from "@/config/journal";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
-import { formatIndianCurrency, formatPercent, formatDate } from "@/utils/format";
+import { formatIndianCurrency, formatPercent, formatDateTime } from "@/utils/format";
 import { getPnLColor } from "@/utils/colors";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { usePositions, type PositionView } from "@/hooks/usePositions";
@@ -107,8 +107,9 @@ export default function JournalPage() {
   const handleExport = useCallback(() => {
     downloadCsv(
       "trade-journal.csv",
-      ["Closed", "Contract", "Direction", "Qty", "Entry", "Exit", "P&L", "P&L %", "R", "Tags", "Notes"],
+      ["Opened", "Closed", "Contract", "Direction", "Qty", "Entry", "Exit", "P&L", "P&L %", "R", "Tags", "Notes"],
       trades.map((p) => [
+        p.opened_at ?? "",
         p.closed_at ?? "",
         contractLabel(p),
         p.direction,
@@ -275,7 +276,7 @@ function TradeRow({
         <div className="min-w-0">
           <p className="text-sm font-semibold text-white truncate">{contractLabel(p)}</p>
           <p className="text-xs text-gray-500 mt-0.5">
-            {formatDate(p.closed_at ?? p.opened_at)} · {holdingTime(p.opened_at, p.closed_at)} · {p.quantity} qty
+            Entered {formatDateTime(p.opened_at)} · held {holdingTime(p.opened_at, p.closed_at)} · {p.quantity} qty
           </p>
           {(p.tags ?? []).length > 0 && (
             <div className="flex flex-wrap gap-1 mt-1">
@@ -298,6 +299,10 @@ function TradeRow({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
             <div><p className="text-gray-500">Entry</p><p className="text-white font-medium">{formatIndianCurrency(p.average_price)}</p></div>
             <div><p className="text-gray-500">Exit</p><p className="text-white font-medium">{formatIndianCurrency(p.current_price)}</p></div>
+            <div><p className="text-gray-500">Qty</p><p className="text-white font-medium">{p.quantity}{p.lot_size > 1 ? ` · ${p.quantity / p.lot_size} lot${p.quantity / p.lot_size > 1 ? "s" : ""}` : ""}</p></div>
+            <div><p className="text-gray-500">Invested</p><p className="text-white font-medium">{formatIndianCurrency(p.total_invested)}</p></div>
+            <div><p className="text-gray-500">Opened</p><p className="text-white font-medium">{formatDateTime(p.opened_at)}</p></div>
+            <div><p className="text-gray-500">Closed</p><p className="text-white font-medium">{p.closed_at ? formatDateTime(p.closed_at) : "—"}</p></div>
             <div><p className="text-gray-500">Direction</p><p className={`font-medium ${win ? "text-green-400" : "text-red-400"}`}>{p.direction}</p></div>
             <div><p className="text-gray-500">R multiple</p><p className="text-white font-medium">{r != null ? `${r.toFixed(2)}R` : "—"}</p></div>
           </div>
