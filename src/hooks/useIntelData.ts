@@ -27,9 +27,15 @@ import { classifyLeg, tagMoneyness, computePCR, maxPain, extremeOi } from "@/lib
 import { computeSentiment } from "@/lib/intel/sentiment";
 import { buildSetups } from "@/lib/intel/setups";
 import { evaluateChecklist } from "@/lib/intel/checklist";
-import { buildInsights } from "@/lib/intel/insights";
+import { buildInsights, generateExtraInsights } from "@/lib/intel/insights";
 import { buildVerdict } from "@/lib/intel/verdict";
 import { buildEventList, computeEventRisk } from "@/lib/intel/events";
+import { calculateWriterConfidence } from "@/lib/intel/writers";
+import { calculatePremiumBehaviour } from "@/lib/intel/premium";
+import { calculateStrikeMigration } from "@/lib/intel/migration";
+import { calculateTradeReadiness } from "@/lib/intel/readiness";
+import { calculateIntelligenceScore, calculateConfidenceMetrics } from "@/lib/intel/score";
+import { calculateMarketBias, calculateBullBearScore, deriveInstitutionalFlow } from "@/lib/intel/brain";
 
 export interface IntelConfigState {
   refreshMs: number;
@@ -82,6 +88,15 @@ const EMPTY_STATE: IntelState = {
   insights: [],
   verdict: null,
   eventRisk: null,
+  aiBrief: null,
+  writers: null,
+  premium: null,
+  migration: null,
+  readiness: null,
+  intelligenceScore: null,
+  confidence: null,
+  bullBear: null,
+  institutionalFlow: null,
 };
 
 /** Resolve the scheduled event risk (config calendar + live expiry) for `now`. */
@@ -120,6 +135,8 @@ export function useIntelData() {
 
   const prevSnapRef = useRef<Map<number, StrikeSnap>>(new Map());
   const pollCountRef = useRef(0);
+  // Session-open support/resistance baseline for strike migration (set once).
+  const baselineSRRef = useRef<{ support: number; resistance: number } | null>(null);
   const inFlight = useRef(false);
   const spotRef = useRef(0); // latest spot, for the candle mock anchor — kept off poll deps
 
@@ -181,6 +198,13 @@ export function useIntelData() {
         }
         prevSnapRef.current = nextSnap;
         pollCountRef.current += 1;
+        // Capture the session-open defended levels once, so strike migration
+        // measures drift from the open rather than poll-to-poll noise.
+        if (baselineSRRef.current == null) {
+          const s = extremeOi(chain.chain, "pe").strike;
+          const r = extremeOi(chain.chain, "ce").strike;
+          if (s > 0 && r > 0) baselineSRRef.current = { support: s, resistance: r };
+        }
         setDeltas(nextDeltas);
         setRawChain(chain);
       }
@@ -316,7 +340,62 @@ export function useIntelData() {
       signals,
     };
 
-    return { rows, oi, oiSkewScore, atm, warming };
+    // ATM-window (±1 strike) premium behaviour + near-ATM volume/IV primitives
+    // for the writer / premium / intelligence-score helpers.
+    const atmWin = sorted.slice(Math.max(0, center - 1), Math.min(sorted.length, center + 2));
+    let atmCeLtp = 0;
+    let atmPeLtp = 0;
+    for (const r of atmWin) {
+      atmCeLtp += r.ce.ltp;
+      atmPeLtp += r.pe.ltp;
+    }
+    let atmCeLtpDelta: number | null = null;
+    let atmPeLtpDelta: number | null = null;
+    if (!warming) {
+      let ce = 0;
+      let pe = 0;
+      let ok = true;
+      for (const r of atmWin) {
+        const d = deltas[r.strike_price];
+        if (!d || d.ceLtp == null || d.peLtp == null) {
+          ok = false;
+          break;
+        }
+        ce += d.ceLtp;
+        pe += d.peLtp;
+      }
+      if (ok) {
+        atmCeLtpDelta = round2(ce);
+        atmPeLtpDelta = round2(pe);
+      }
+    }
+
+    let ceVolNearAtm = 0;
+    let peVolNearAtm = 0;
+    for (const r of slice) {
+      ceVolNearAtm += r.ce.volume ?? 0;
+      peVolNearAtm += r.pe.volume ?? 0;
+    }
+
+    const atmRow = atmIdx >= 0 ? sorted[atmIdx] : sorted[center];
+    const atmCeIv = atmRow?.ce.iv ?? null;
+    const atmPeIv = atmRow?.pe.iv ?? null;
+
+    return {
+      rows,
+      oi,
+      oiSkewScore,
+      atm,
+      warming,
+      atmCeLtp,
+      atmPeLtp,
+      atmCeLtpDelta,
+      atmPeLtpDelta,
+      ceVolNearAtm,
+      peVolNearAtm,
+      atmCeIv,
+      atmPeIv,
+    };
   }, [rawChain, deltas, config.atmRange]);
 
   // ---- Full state (recomputes on tick; cheap once chainBlock is cached) ----
@@ -416,7 +495,110 @@ export function useIntelData() {
       resistance: oi.resistance,
     });
 
-    const insights = buildInsights({ overview, sentiment, oi, verdict });
+    const eventRisk = resolveEventRisk(expiry);
+
+    // ---- AI decision-engine layer (all DERIVED from the reads above) ----
+    const writers = calculateWriterConfidence({
+      pcr: oi.pcr,
+      oiSkewScore,
+      atmPeLtpDelta: chainBlock.atmPeLtpDelta,
+      atmCeLtpDelta: chainBlock.atmCeLtpDelta,
+    });
+
+    const premium = calculatePremiumBehaviour({
+      ceLtp: chainBlock.atmCeLtp,
+      peLtp: chainBlock.atmPeLtp,
+      ceLtpDelta: chainBlock.atmCeLtpDelta,
+      peLtpDelta: chainBlock.atmPeLtpDelta,
+    });
+
+    const migration = calculateStrikeMigration({
+      prevSupport: baselineSRRef.current?.support ?? null,
+      prevResistance: baselineSRRef.current?.resistance ?? null,
+      currSupport: oi.support,
+      currResistance: oi.resistance,
+    });
+
+    const bullBear = calculateBullBearScore(sentiment.bull, sentiment.bear);
+    const institutionalFlow = deriveInstitutionalFlow({ writerWinner: writers.winner, changePercent });
+
+    const intelligenceScore = calculateIntelligenceScore({
+      premiumTone: premium.tone,
+      premiumAvailable: !premium.insufficient,
+      pcr: oi.pcr,
+      oiSkewScore,
+      ceVolume: chainBlock.ceVolNearAtm,
+      peVolume: chainBlock.peVolNearAtm,
+      migrationTone: migration.tone,
+      migrationAvailable: !migration.insufficient,
+      trend,
+      trendConfidence,
+      atmCeIv: chainBlock.atmCeIv,
+      atmPeIv: chainBlock.atmPeIv,
+      changePercent,
+      distanceFromVwapPct,
+    });
+
+    const readiness = calculateTradeReadiness({
+      writerWinner: writers.winner,
+      pcr: oi.pcr,
+      premiumTone: premium.tone,
+      oiSkewScore,
+      ceVolume: chainBlock.ceVolNearAtm,
+      peVolume: chainBlock.peVolNearAtm,
+      migrationTone: migration.tone,
+      ltp: spot,
+      vwap,
+      changePercent,
+      support: oi.support,
+      resistance: oi.resistance,
+    });
+
+    const topSetup = setups[0] ?? null;
+    const distanceToTriggerAtr = topSetup && atr ? Math.abs(spot - topSetup.trigger) / atr : null;
+    const atExtreme =
+      (overview.dayHigh != null && spot > 0 && Math.abs(spot - overview.dayHigh) / spot < 0.001) ||
+      (overview.dayLow != null && spot > 0 && Math.abs(spot - overview.dayLow) / spot < 0.001);
+
+    const winnerConfidence =
+      writers.winner === "put"
+        ? writers.putConfidence
+        : writers.winner === "call"
+          ? writers.callConfidence
+          : writers.putConfidence != null && writers.callConfidence != null
+            ? Math.max(writers.putConfidence, writers.callConfidence)
+            : null;
+
+    const confidence = calculateConfidenceMetrics({
+      writerConfidence: winnerConfidence,
+      setupConfidence: topSetup?.confidence ?? null,
+      trend,
+      trendConfidence,
+      trap: verdict.trap,
+      distanceToTriggerAtr,
+      oiSkewScore,
+      changePercent,
+      eventGate: eventRisk?.gate ?? null,
+      atExtreme,
+    });
+
+    const aiBrief = calculateMarketBias({
+      bias: sentiment.overall,
+      confidence: sentiment.confidence,
+      reasons: sentiment.reasons,
+      topSetup: topSetup ? { direction: topSetup.direction, trigger: topSetup.trigger } : null,
+      support: oi.support,
+      resistance: oi.resistance,
+      trendConfidence,
+      eventGate: eventRisk?.gate ?? null,
+      trap: verdict.trap,
+      falseBreakoutRisk: confidence.falseBreakoutRisk,
+    });
+
+    const insights = [
+      ...buildInsights({ overview, sentiment, oi, verdict }),
+      ...generateExtraInsights({ writers, premium, migration, confidence, oi }),
+    ];
 
     return {
       symbol,
@@ -435,7 +617,16 @@ export function useIntelData() {
       checklist,
       insights,
       verdict,
-      eventRisk: resolveEventRisk(expiry),
+      eventRisk,
+      aiBrief,
+      writers,
+      premium,
+      migration,
+      readiness,
+      intelligenceScore,
+      confidence,
+      bullBear,
+      institutionalFlow,
     };
   }, [rawChain, chainBlock, candles, candleSource, liveQuote, expiry, symbol, lastUpdated, config.confidenceThreshold]);
 

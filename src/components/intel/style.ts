@@ -49,6 +49,19 @@ export function toneAccent(tone: InsightTone): string {
   }[tone];
 }
 
+export function riskClasses(risk: "low" | "medium" | "high"): { text: string; bg: string } {
+  return {
+    low: { text: "text-green-400", bg: "bg-green-500/10 border-green-500/20" },
+    medium: { text: "text-amber-400", bg: "bg-amber-500/10 border-amber-500/20" },
+    high: { text: "text-red-400", bg: "bg-red-500/10 border-red-500/20" },
+  }[risk];
+}
+
+/** Momentum is non-directional — violet (UI accent) when strong, fading to gray. */
+export function momentumClasses(m: "weak" | "moderate" | "strong"): string {
+  return m === "strong" ? "text-violet-300" : m === "moderate" ? "text-gray-300" : "text-gray-500";
+}
+
 export function buildupClasses(b: OiBuildup): string {
   switch (b) {
     case "long-buildup":

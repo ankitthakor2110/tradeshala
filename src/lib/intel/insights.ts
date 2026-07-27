@@ -2,7 +2,18 @@
 // no LLM call, so they update on every tick, cost nothing, and are fully
 // traceable to the numbers on screen. Pure — no DB / env / clock.
 
-import type { Insight, MarketOverview, OiAnalysis, SentimentScore, Verdict } from "@/types/intel";
+import type {
+  ConfidenceMetrics,
+  Insight,
+  MarketOverview,
+  OiAnalysis,
+  PremiumBehaviour,
+  SentimentScore,
+  StrikeMigration,
+  Verdict,
+  WriterConfidence,
+} from "@/types/intel";
+import { INTEL_CONFIG } from "@/config/intel";
 
 export interface InsightContext {
   overview: MarketOverview;
@@ -53,6 +64,59 @@ export function buildInsights(ctx: InsightContext): Insight[] {
   if (verdict.trap && verdict.trapNote) {
     push("warning", verdict.trapNote);
   }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Extra institutional-style insights from the AI decision-engine layer. Kept
+// separate from buildInsights (which existing tests pin) — the hook concatenates
+// both into state.insights. Each line is traceable to a number on screen.
+// ---------------------------------------------------------------------------
+
+export interface ExtraInsightContext {
+  writers: WriterConfidence | null;
+  premium: PremiumBehaviour | null;
+  migration: StrikeMigration | null;
+  confidence: ConfidenceMetrics | null;
+  oi: OiAnalysis;
+}
+
+export function generateExtraInsights(ctx: ExtraInsightContext): Insight[] {
+  const out: Insight[] = [];
+  const push = (tone: Insight["tone"], text: string) => out.push({ id: `x${out.length}`, tone, text });
+
+  const { writers, premium, migration, confidence, oi } = ctx;
+
+  if (writers && !writers.insufficient && writers.winner && writers.winner !== "balanced") {
+    if (writers.winner === "put") {
+      push("bullish", `Put writers continue defending ${oi.support} — ${writers.reason.toLowerCase()}.`);
+    } else {
+      push("bearish", `Call writers are capping ${oi.resistance} — ${writers.reason.toLowerCase()}.`);
+    }
+  }
+
+  if (premium && !premium.insufficient && premium.tone !== "neutral") {
+    push(premium.tone, `Premium behaviour: ${premium.interpretation}.`);
+  }
+
+  if (migration && !migration.insufficient && migration.tone !== "neutral") {
+    const parts: string[] = [];
+    if (migration.supportShift !== "none") parts.push(`support ${migration.prevSupport}→${migration.currSupport}`);
+    if (migration.resistanceShift !== "none")
+      parts.push(`resistance ${migration.prevResistance}→${migration.currResistance}`);
+    push(migration.tone, `${migration.interpretation}${parts.length ? ` (${parts.join(", ")})` : ""}.`);
+  }
+
+  if (confidence?.breakoutProbability != null && confidence.breakoutProbability >= 60) {
+    push("bullish", `High breakout probability (${confidence.breakoutProbability}%) if the trigger gives way.`);
+  }
+  if (confidence?.falseBreakoutRisk != null && confidence.falseBreakoutRisk >= 60) {
+    push("warning", `Elevated false-breakout risk (${confidence.falseBreakoutRisk}%) — wait for confirmation.`);
+  }
+
+  // Ensure the panel is never empty when nothing notable fired.
+  if (!out.length) push("neutral", INTEL_CONFIG.insufficientData);
 
   return out;
 }

@@ -132,6 +132,199 @@ export const INTEL_CONFIG = {
       "Event times are scheduled estimates from a maintained calendar — verify against official sources; actual release times can shift.",
   },
 
+  // ===========================================================================
+  // AI decision-engine knobs — copy, weights, thresholds for the new cards.
+  // Pure logic lives in src/lib/intel/{writers,premium,migration,readiness,
+  // score,brain}.ts and reads from here so the math stays declarative.
+  // ===========================================================================
+
+  writers: {
+    // Blend weights for put/call writer confidence.
+    weights: { pcr: 1.0, oiSkew: 1.2, premiumDecay: 1.0 },
+    // |winner margin| (confidence points) below this ⇒ "balanced".
+    balancedMargin: 8,
+    labels: {
+      title: "Option Writer Intelligence",
+      subtitle: "Who controls the chain — put writers vs call writers",
+      put: "Put Writers",
+      call: "Call Writers",
+      winnerPut: "Put writers in control",
+      winnerCall: "Call writers in control",
+      balanced: "Neither side dominant",
+      reasons: {
+        putPremiumDecay: "Put Premium Decaying",
+        freshPutWriting: "Fresh Put Writing",
+        callCovering: "Call Covering",
+        callPremiumDecay: "Call Premium Decaying",
+        freshCallWriting: "Fresh Call Writing",
+        putCovering: "Put Covering",
+        pcrPut: "Put OI dominance (PCR)",
+        pcrCall: "Call OI dominance (PCR)",
+        balanced: "Writing is two-sided",
+      } as Record<string, string>,
+    },
+  },
+
+  premium: {
+    // |Δ| ≥ this fraction of the base premium ⇒ "fast" rise/decay.
+    fastPctOfBase: 0.12,
+    // |Δ| < this fraction ⇒ "flat".
+    flatPct: 0.03,
+    labels: {
+      title: "Premium Behaviour",
+      subtitle: "ATM option premium as a primary signal — not just LTP",
+      ce: "CE Premium",
+      pe: "PE Premium",
+      directions: {
+        increasing: "Increasing",
+        decreasing: "Decreasing",
+        "fast-rise": "Fast Rise",
+        "fast-decay": "Fast Decay",
+        flat: "Flat",
+      } as Record<string, string>,
+    },
+    interpret: {
+      putComfortable: "Put sellers comfortable — bullish tone",
+      callTrapped: "Call sellers trapped — bullish pressure",
+      callComfortable: "Call sellers comfortable — bearish tone",
+      putTrapped: "Put sellers trapped — bearish pressure",
+      strongBull: "Strong bullish momentum",
+      strongBear: "Strong bearish momentum",
+      shortCovering: "Short covering",
+      longUnwinding: "Long unwinding",
+      mixed: "Two-sided premium — no clear edge",
+    },
+  },
+
+  migration: {
+    labels: {
+      title: "Strike Migration",
+      subtitle: "How writers have shifted the defended levels this session",
+      prevSupport: "Previous Support",
+      currSupport: "Current Support",
+      supportShift: "Support Shift",
+      prevResistance: "Previous Resistance",
+      currResistance: "Current Resistance",
+      resistanceShift: "Resistance Shift",
+      shift: { higher: "Higher", lower: "Lower", none: "No change" } as Record<string, string>,
+    },
+    interpret: {
+      supportHigher: "Support shifted higher — institutional buying",
+      supportLower: "Support shifted lower — buyers retreating",
+      resistanceHigher: "Resistance shifted higher — sellers retreating",
+      resistanceLower: "Resistance shifted lower — institutional selling",
+      strongBull: "Both levels migrating up — strong institutional buying",
+      strongBear: "Both levels migrating down — strong institutional selling",
+      none: "No migration — levels holding",
+    },
+  },
+
+  readiness: {
+    minReady: 60, // score ≥ this ⇒ "ready"
+    caution: 45, // between caution & minReady ⇒ "forming"
+    labels: {
+      title: "Trade Readiness",
+      subtitle: "Multi-condition go / no-go",
+      ready: "Ready for breakout",
+      caution: "Setup forming — wait for confirmation",
+      avoid: "Avoid trading",
+    },
+    // Weight per condition (all real-data). Used to normalize 0-100.
+    weights: {
+      writing: 1.4,
+      pcr: 1.0,
+      premium: 1.3,
+      oiChange: 1.2,
+      volume: 0.8,
+      migration: 1.0,
+      priceAction: 1.1,
+      supportHolding: 1.0,
+      resistanceBreak: 1.0,
+    },
+  },
+
+  intelligenceScore: {
+    labels: {
+      title: "Market Intelligence Score",
+      subtitle: "One combined 0-100 read across every fed signal",
+      bands: {
+        extremeBull: "Extremely Bullish",
+        strongBull: "Strong Bullish",
+        bull: "Bullish",
+        neutral: "Neutral",
+        bear: "Bearish",
+        strongBear: "Strong Bearish",
+      } as Record<string, string>,
+    },
+    // score = 50 + net*50, net = Σ(contribution·weight)/Σ(weight over AVAILABLE factors).
+    weights: {
+      premium: 1.3,
+      pcr: 1.0,
+      oiChange: 1.2,
+      freshWriting: 1.2,
+      volume: 0.8,
+      migration: 1.0,
+      priceTrend: 1.3,
+      iv: 0.5,
+      priceAction: 1.0,
+    },
+    // Band thresholds on |score − 50|.
+    bands: { extreme: 35, strong: 20, mild: 8 },
+    unavailableNote: "Breadth & full Greeks are not fed — excluded from the score.",
+  },
+
+  confidenceEngine: {
+    labels: {
+      title: "Confidence Engine",
+      subtitle: "Graded probabilities, not binary signals",
+      writer: "Writer Confidence",
+      breakout: "Breakout Probability",
+      trend: "Trend Strength",
+      falseBreak: "False-Breakout Risk",
+      reversal: "Reversal Probability",
+    },
+  },
+
+  aiBrief: {
+    labels: {
+      title: "AI Market Intelligence",
+      subtitle: "What the market is likely doing — and why",
+      bias: "Market Bias",
+      confidence: "Confidence",
+      recommendation: "Trade Recommendation",
+      support: "Support",
+      resistance: "Resistance",
+      momentum: "Momentum",
+      risk: "Risk Level",
+      why: "Why this signal",
+      wait: "Wait — no clean edge yet",
+      noTrade: "No Trade — stand aside",
+      momentumLabels: { weak: "Weak", moderate: "Moderate", strong: "Strong" } as Record<string, string>,
+      riskLabels: { low: "Low", medium: "Medium", high: "High" } as Record<string, string>,
+    },
+    // Momentum strength from trend confidence (0-100).
+    momentumBands: { strong: 66, moderate: 33 },
+  },
+
+  institutionalFlow: {
+    labels: {
+      title: "Institutional Flow",
+      subtitle: "Who currently controls the tape (derived from option writing)",
+      controlledBy: "Market controlled by",
+      controllers: {
+        "put-writers": "Put Writers",
+        "call-writers": "Call Writers",
+        buyers: "Buyers",
+        sellers: "Sellers",
+        balanced: "Two-sided",
+      } as Record<string, string>,
+      fiiDii: "FII / DII Flow",
+    },
+  },
+
+  // Shared copy for any card whose feed is missing / still warming up.
+  insufficientData: "Insufficient Data — waiting for a live feed / session warm-up.",
+
   labels: {
     overview: "Market Overview",
     sentiment: "Sentiment Engine",
