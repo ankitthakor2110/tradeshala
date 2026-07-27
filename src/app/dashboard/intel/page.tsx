@@ -6,6 +6,7 @@ import { useIntelData } from "@/hooks/useIntelData";
 import { INTEL_CONFIG } from "@/config/intel";
 import Skeleton from "@/components/ui/Skeleton";
 import VerdictHero from "@/components/intel/VerdictHero";
+import AiBrief from "@/components/intel/AiBrief";
 import MarketOverview from "@/components/intel/MarketOverview";
 import SentimentEngine from "@/components/intel/SentimentEngine";
 import OiAnalysis from "@/components/intel/OiAnalysis";
@@ -15,6 +16,14 @@ import AiInsights from "@/components/intel/AiInsights";
 import ConfigPanel from "@/components/intel/ConfigPanel";
 import NoFeedCard from "@/components/intel/NoFeedCard";
 import EventRiskPanel from "@/components/intel/EventRiskPanel";
+import IntelligenceScoreCard from "@/components/intel/IntelligenceScoreCard";
+import WriterIntelligence from "@/components/intel/WriterIntelligence";
+import PremiumBehaviour from "@/components/intel/PremiumBehaviour";
+import StrikeMigration from "@/components/intel/StrikeMigration";
+import BullBearScore from "@/components/intel/BullBearScore";
+import TradeReadiness from "@/components/intel/TradeReadiness";
+import ConfidenceEngine from "@/components/intel/ConfidenceEngine";
+import InstitutionalFlow from "@/components/intel/InstitutionalFlow";
 
 // Heavy / self-fetching sections are code-split so the decision core paints first.
 const OptionChainTable = dynamic(() => import("@/components/intel/OptionChainTable"), {
@@ -72,6 +81,11 @@ export default function MarketIntelPage() {
         )
       ) : (
         <>
+          {/* AI decision engine — the first thing a trader sees. */}
+          {state.aiBrief && (
+            <AiBrief aiBrief={state.aiBrief} intelligenceScore={state.intelligenceScore} bullBear={state.bullBear} />
+          )}
+
           <VerdictHero
             verdict={state.verdict!}
             sentiment={state.sentiment!}
@@ -82,6 +96,18 @@ export default function MarketIntelPage() {
             eventGate={state.eventRisk?.gate ?? null}
             eventReason={state.eventRisk?.reason ?? null}
           />
+
+          {/* AI decision cards — grouped desk-style below the hero. */}
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            <IntelligenceScoreCard score={state.intelligenceScore} />
+            <WriterIntelligence writers={state.writers} />
+            <PremiumBehaviour premium={state.premium} />
+            <StrikeMigration migration={state.migration} />
+            <BullBearScore bullBear={state.bullBear} />
+            <TradeReadiness readiness={state.readiness} />
+            <ConfidenceEngine confidence={state.confidence} />
+            <InstitutionalFlow flow={state.institutionalFlow} />
+          </div>
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
             <div className="space-y-5 lg:col-span-2">

@@ -197,6 +197,128 @@ export interface EventRisk {
   coverageThrough: string | null; // how far the maintained calendar extends
 }
 
+// ---------------------------------------------------------------------------
+// AI decision-engine layer (see src/lib/intel/{writers,premium,migration,
+// readiness,score,brain}.ts). Everything here is DERIVED from live price + OI.
+// When an input is missing (warming up, or no feed), the field is null / carries
+// an `insufficient` flag so the UI can show "Insufficient Data" — never a guess.
+// ---------------------------------------------------------------------------
+
+export type MomentumStrength = "weak" | "moderate" | "strong";
+export type RiskLevel = "low" | "medium" | "high";
+
+/** The headline "AI Market Intelligence" read — what to do and why. */
+export interface AiBrief {
+  bias: Bias;
+  confidence: number; // 0-100
+  recommendation: string; // "Buy CE above 24050" / "Buy PE below 23980" / "Wait — no edge"
+  recommendationDirection: "long" | "short" | "wait";
+  support: number | null;
+  resistance: number | null;
+  momentum: MomentumStrength;
+  risk: RiskLevel;
+  reasons: string[]; // "Why this signal"
+}
+
+export type WriterWinner = "put" | "call" | "balanced";
+
+/** Who controls the option chain — put writers vs call writers. */
+export interface WriterConfidence {
+  putConfidence: number | null; // 0-100
+  callConfidence: number | null; // 0-100
+  winner: WriterWinner | null;
+  reason: string; // "Put Premium Decaying", "Fresh Put Writing", "Call Covering", …
+  insufficient: boolean;
+}
+
+export type PremiumDirection = "increasing" | "decreasing" | "fast-rise" | "fast-decay" | "flat";
+
+export interface PremiumLeg {
+  direction: PremiumDirection;
+  changePct: number | null; // session % move in the ATM premium
+}
+
+/** ATM premium behaviour, read as a primary signal (not just LTP display). */
+export interface PremiumBehaviour {
+  ce: PremiumLeg;
+  pe: PremiumLeg;
+  interpretation: string; // "Put sellers comfortable", "Call sellers trapped", "Short Covering", …
+  tone: InsightTone;
+  insufficient: boolean;
+}
+
+export type StrikeShift = "higher" | "lower" | "none";
+
+/** How institutional writers have shifted the defended support/resistance strikes. */
+export interface StrikeMigration {
+  prevSupport: number | null;
+  currSupport: number | null;
+  supportShift: StrikeShift;
+  prevResistance: number | null;
+  currResistance: number | null;
+  resistanceShift: StrikeShift;
+  interpretation: string; // "Support shifted higher — strong institutional buying", …
+  tone: InsightTone;
+  insufficient: boolean;
+}
+
+export interface ReadinessFactor {
+  key: string;
+  label: string;
+  state: ChecklistState; // "pass" | "fail" | "na"
+  favors: "long" | "short" | null;
+  detail: string;
+}
+
+/** Multi-condition trade-readiness gauge. */
+export interface TradeReadiness {
+  score: number; // 0-100
+  label: string; // "Ready for breakout" / "Avoid trading" / …
+  direction: "long" | "short" | "none";
+  factors: ReadinessFactor[];
+}
+
+export interface ScoreFactor {
+  key: string;
+  label: string;
+  contribution: number; // signed directional value in [-1,1] (before weighting)
+  detail: string;
+  available: boolean; // false → not fed (e.g. breadth / greeks); excluded from the score
+}
+
+/** One combined 0-100 read (50 = neutral, >50 bullish). */
+export interface IntelligenceScore {
+  score: number; // 0-100
+  label: string; // "Extremely Bullish" … "Neutral" … "Strong Bearish"
+  tone: InsightTone;
+  factors: ScoreFactor[];
+}
+
+/** Graded confidence engine — probabilities instead of binary signals. */
+export interface ConfidenceMetrics {
+  writerConfidence: number | null; // 0-100
+  breakoutProbability: number | null;
+  trendStrength: number | null;
+  falseBreakoutRisk: number | null;
+  reversalProbability: number | null;
+}
+
+export interface BullBearPressure {
+  bull: number; // 0-100
+  bear: number; // 0-100
+  pressure: "bull-dominant" | "bear-dominant" | "balanced";
+}
+
+export type FlowController = "put-writers" | "call-writers" | "buyers" | "sellers" | "balanced";
+
+/** "Market controlled by" — derived from option writing (no FII/DII feed). */
+export interface InstitutionalFlow {
+  controlledBy: FlowController;
+  explanation: string;
+  fiiDii: null; // no feed — surfaced as "Insufficient Data"
+  insufficient: boolean;
+}
+
 /** The fully-composed dashboard state produced by `useIntelData`. */
 export interface IntelState {
   symbol: string;
@@ -216,4 +338,14 @@ export interface IntelState {
   insights: Insight[];
   verdict: Verdict | null;
   eventRisk: EventRisk | null;
+  // AI decision-engine layer (all nullable until data is ready).
+  aiBrief: AiBrief | null;
+  writers: WriterConfidence | null;
+  premium: PremiumBehaviour | null;
+  migration: StrikeMigration | null;
+  readiness: TradeReadiness | null;
+  intelligenceScore: IntelligenceScore | null;
+  confidence: ConfidenceMetrics | null;
+  bullBear: BullBearPressure | null;
+  institutionalFlow: InstitutionalFlow | null;
 }
