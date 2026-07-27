@@ -45,7 +45,7 @@ export const portfolioConfig = {
 
   // "Reset account" — restore a fresh paper account (balance + wipe everything).
   reset: {
-    button: "Reset account",
+    button: "Reset my account",
     modalTitle: "Reset your paper account?",
     warning:
       "This restores your virtual balance to the starting amount and permanently deletes ALL open and closed positions and your entire order history. Your win-rate, P&L and equity curve reset to zero.",
