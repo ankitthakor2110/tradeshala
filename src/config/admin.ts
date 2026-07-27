@@ -1,6 +1,6 @@
 export const ADMIN_CONFIG = {
   adminEmail: process.env.NEXT_PUBLIC_ADMIN_EMAIL,
-  restrictedPages: ["/connection-status"],
+  restrictedPages: ["/connection-status", "/dashboard/users"],
 };
 
 export const isAdmin = (email: string | null | undefined): boolean => {
