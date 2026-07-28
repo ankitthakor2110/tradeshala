@@ -5,7 +5,7 @@ import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { dashboardConfig } from "@/config/dashboard";
 import { getCurrentUser } from "@/services/auth.service";
-import { canReconnectUpstox } from "@/config/admin";
+import { canReconnectUpstox, isAdmin } from "@/config/admin";
 import BrandLogo from "@/components/ui/BrandLogo";
 import SidebarIcon from "./SidebarIcon";
 
@@ -21,10 +21,15 @@ export default function Sidebar({ onClose }: SidebarProps) {
   // manages the shared Upstox connection (same gate as the reconnect banner),
   // so they can save credentials without hunting for the hidden URL.
   const [canManageBroker, setCanManageBroker] = useState(false);
+  // The single admin also sees the "Users" management item (UI-only reveal;
+  // the real gate is server middleware on /dashboard/users).
+  const [isAdminUser, setIsAdminUser] = useState(false);
   useEffect(() => {
     let active = true;
     getCurrentUser().then((user) => {
-      if (active && canReconnectUpstox(user?.email)) setCanManageBroker(true);
+      if (!active) return;
+      if (canReconnectUpstox(user?.email)) setCanManageBroker(true);
+      if (isAdmin(user?.email)) setIsAdminUser(true);
     });
     return () => {
       active = false;
@@ -56,7 +61,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
           .filter(
             (item) =>
               item.visible !== false ||
-              (item.href === "/dashboard/broker" && canManageBroker)
+              (item.href === "/dashboard/broker" && canManageBroker) ||
+              (item.href === "/dashboard/users" && isAdminUser)
           )
           .map((item) => (
             <Link

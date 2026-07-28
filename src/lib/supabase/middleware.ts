@@ -52,7 +52,7 @@ export async function updateSession(request: NextRequest) {
     }
 
     // Admin-only routes
-    const adminOnlyRoutes = ["/connection-status"];
+    const adminOnlyRoutes = ["/connection-status", "/dashboard/users"];
     const isAdminRoute = adminOnlyRoutes.some((route) =>
       request.nextUrl.pathname.startsWith(route)
     );
