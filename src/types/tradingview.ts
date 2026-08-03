@@ -72,3 +72,57 @@ export interface TvEquityPoint {
   net: number;
   cumulative: number;
 }
+
+// ---------------------------------------------------------------------------
+// Engine trades — the REAL option paper-trades the webhook engine places into
+// the trade simulator (positions/orders tables), as opposed to the tv_* signal
+// ledger above. These are derived client-side from the trade account's own
+// positions (strategy_name != null) + closing orders, for the descriptive
+// "Automated Trades" view on the Signals page.
+// ---------------------------------------------------------------------------
+
+// Why the position closed. Derived from the closing SELL order's notes:
+// "Auto: target|stop-loss|trailing-stop|auto square-off|scale-out ..." (server
+// GTT) or "TradingView exit: ..." (signal/reverse).
+export type EngineExitReason =
+  | "target"
+  | "stop"
+  | "trail"
+  | "squareoff"
+  | "scaleout"
+  | "signal"
+  | "manual";
+
+export interface EngineOpenPosition {
+  id: string;
+  strategy: string;
+  symbol: string;
+  optionType: "CE" | "PE";
+  strike: number | null;
+  expiry: string | null;
+  qty: number;
+  lotSize: number;
+  entryPrice: number;
+  currentPrice: number | null;
+  stopLoss: number | null;
+  target: number | null;
+  openedAt: string;
+}
+
+export interface EngineTrade {
+  id: string;
+  strategy: string;
+  symbol: string;
+  optionType: "CE" | "PE";
+  strike: number | null;
+  expiry: string | null;
+  qty: number;
+  lotSize: number;
+  entryPrice: number;
+  exitPrice: number;
+  net: number;
+  pnlPercent: number;
+  openedAt: string;
+  closedAt: string | null;
+  exitReason: EngineExitReason;
+}

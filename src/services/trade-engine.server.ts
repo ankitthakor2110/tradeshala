@@ -1,5 +1,5 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
-import type { Position } from "@/types/database";
+import type { Position, OptionChainData } from "@/types/database";
 import type { WebhookPayload, EntryPayload } from "@/lib/tv/schema";
 import type { ApplyResult } from "@/lib/tv/processor";
 import { TRADE_CONFIG } from "@/config/trade";
@@ -15,11 +15,15 @@ import { simulateFill } from "@/services/trade-engine.service";
 // signal to a simulator order in a configured account, using the SERVICE-ROLE
 // admin client (webhooks have no user session) and server-side option pricing.
 //
-// Mapping (decided with the product owner): entry long → BUY ATM CALL, entry
-// short → BUY ATM PUT (honoring an explicit option_type when present), at the
-// nearest expiry, priced live from the chain; exit → close that contract. Only
-// ever BUYs to open and SELLs to close — no option writing — so the short-margin
-// path of the client engine is intentionally not reused here.
+// Mapping: entry long → BUY a CALL, entry short → BUY a PUT (honoring an explicit
+// option_type when present), at the nearest expiry. The strike is the contract
+// whose |delta| is closest to TV_ENGINE_TARGET_DELTA (≈0.60), falling back to ATM
+// when greeks are unavailable. Size is TV_ENGINE_LOTS lots (× lot size). A
+// premium-points bracket is stamped on the position — target = entry +
+// TV_ENGINE_TARGET_POINTS, stop = entry − TV_ENGINE_STOP_POINTS — which the server
+// GTT pass (runGttOnce) auto-exits on. An opposite/exit signal also closes the
+// contract, so exit is "whichever comes first". Only ever BUYs to open and SELLs
+// to close — no option writing — so the short-margin path is not reused here.
 // ============================================================================
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -93,24 +97,46 @@ async function priceContract(
 const mockBlocked = (source: string): boolean =>
   TV_WEBHOOK_CONFIG.engineRequireLive && source === "mock";
 
-/** Nearest-expiry ATM contract + its live premium for a fresh entry. */
-async function resolveAtm(
+/**
+ * Nearest-expiry entry contract: the strike whose |delta| is closest to
+ * `targetDelta` (using live chain greeks), with its live premium. Falls back to
+ * the ATM strike when no row carries a usable (non-zero) delta — e.g. the mock
+ * chain or a provider that didn't return greeks.
+ */
+async function resolveEntryStrike(
   symbol: string,
-  optionType: "CE" | "PE"
-): Promise<{ expiry: string; strike: number; premium: number; source: string } | null> {
+  optionType: "CE" | "PE",
+  targetDelta: number
+): Promise<{ expiry: string; strike: number; premium: number; source: string; byDelta: boolean } | null> {
   const { expiries } = await getExpiries(symbol);
   const expiry = expiries[0];
   if (!expiry) return null;
   const chain = await fetchOptionChain(symbol, expiry);
   if (chain.chain.length === 0) return null;
-  const row = chain.chain.find((r) => r.strike_price === chain.atmStrike) ?? chain.chain[0];
-  const premium = optionType === "CE" ? row.ce.ltp : row.pe.ltp;
+
+  const leg = (r: OptionChainData) => (optionType === "CE" ? r.ce : r.pe);
+
+  // Candidate rows that have both a usable delta and a real premium.
+  const withDelta = chain.chain.filter((r) => Math.abs(leg(r).delta) > 0 && leg(r).ltp > 0);
+
+  let row: OptionChainData | undefined;
+  let byDelta = false;
+  if (withDelta.length > 0) {
+    const dist = (r: OptionChainData) => Math.abs(Math.abs(leg(r).delta) - targetDelta);
+    row = withDelta.reduce((best, r) => (dist(r) < dist(best) ? r : best));
+    byDelta = true;
+  } else {
+    // No greeks — fall back to ATM so a trade still fires.
+    row = chain.chain.find((r) => r.strike_price === chain.atmStrike) ?? chain.chain[0];
+  }
+
+  const premium = leg(row).ltp;
   if (!premium || premium <= 0) return null;
-  return { expiry, strike: row.strike_price, premium, source: chain.source };
+  return { expiry, strike: row.strike_price, premium, source: chain.source, byDelta };
 }
 
-// --- Open: BUY the ATM option to open a fresh LONG position ---
-async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): Promise<EngineResult> {
+// --- Open: BUY the ~target-delta option to open a fresh LONG position ---
+async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload): Promise<EngineResult> {
   const symbol = p.symbol.toUpperCase();
   const lotSize = TRADE_CONFIG.defaultLotSizes[symbol];
   if (!lotSize) {
@@ -118,27 +144,29 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
   }
 
   const optionType = optionTypeFor(p);
-  const atm = await resolveAtm(symbol, optionType);
-  if (!atm) {
+  const pick = await resolveEntryStrike(symbol, optionType, TV_WEBHOOK_CONFIG.engineTargetDelta);
+  if (!pick) {
     return { executed: false, detail: `could not price ${symbol} ${optionType} (no live chain/premium)` };
   }
   // Never open at a fabricated price (live providers down / token expired).
-  if (mockBlocked(atm.source)) {
+  if (mockBlocked(pick.source)) {
     return {
       executed: false,
       detail: `skipped — no live option pricing for ${symbol} (source=mock); reconnect the broker or set TV_ENGINE_REQUIRE_LIVE=false`,
     };
   }
 
-  const quantity = Math.max(1, Math.round(p.qty)) * lotSize;
+  // Deterministic sizing: TV_ENGINE_LOTS lots regardless of the payload qty.
+  const lots = Math.max(1, Math.round(TV_WEBHOOK_CONFIG.engineLots));
+  const quantity = lots * lotSize;
   const fill = simulateFill(
     {
       symbol,
       exchange: exchangeFor(symbol),
       instrument_type: optionType,
       option_type: optionType,
-      strike_price: atm.strike,
-      expiry_date: atm.expiry,
+      strike_price: pick.strike,
+      expiry_date: pick.expiry,
       lot_size: lotSize,
       order_type: "MARKET",
       trade_type: "BUY",
@@ -147,9 +175,15 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
       trigger_price: null,
       notes: null,
     },
-    atm.premium
+    pick.premium
   );
   if (!fill) return { executed: false, detail: "fill simulation returned null" };
+
+  // Premium-points bracket off the actual entry. GTT (runGttOnce) auto-exits when
+  // the live premium crosses either. Stop floored at 0.05 so a sub-N-point premium
+  // still gets a valid (near-worthless) trigger rather than an impossible one.
+  const target = round2(fill.executed_price + TV_WEBHOOK_CONFIG.engineTargetPoints);
+  const stopLoss = round2(Math.max(0.05, fill.executed_price - TV_WEBHOOK_CONFIG.engineStopPoints));
 
   const cost = round2(fill.executed_price * quantity + fill.total_charges);
   const balance = await getBalance(admin, userId);
@@ -171,8 +205,8 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
       instrument_type: optionType,
       company_name: null,
       option_type: optionType,
-      strike_price: atm.strike,
-      expiry_date: atm.expiry,
+      strike_price: pick.strike,
+      expiry_date: pick.expiry,
       lot_size: lotSize,
       order_type: "MARKET",
       trade_type: "BUY",
@@ -183,8 +217,8 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
       executed_price: fill.executed_price,
       executed_quantity: quantity,
       executed_at: now,
-      simulated_bid: round2(atm.premium * 0.999),
-      simulated_ask: round2(atm.premium * 1.001),
+      simulated_bid: round2(pick.premium * 0.999),
+      simulated_ask: round2(pick.premium * 1.001),
       slippage: fill.slippage,
       brokerage: fill.brokerage,
       strategy_id: null,
@@ -209,8 +243,8 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
       instrument_type: optionType,
       company_name: null,
       option_type: optionType,
-      strike_price: atm.strike,
-      expiry_date: atm.expiry,
+      strike_price: pick.strike,
+      expiry_date: pick.expiry,
       lot_size: lotSize,
       direction: "LONG",
       quantity,
@@ -223,8 +257,8 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
       pnl_percent: 0,
       day_pnl: 0,
       status: "OPEN",
-      stop_loss: p.sl ?? null,
-      target: p.tp ?? null,
+      stop_loss: stopLoss,
+      target,
       opened_at: now,
       updated_at: now,
     } as never)
@@ -263,8 +297,8 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
       position_id: position.id,
       instrument_type: optionType,
       option_type: optionType,
-      strike_price: atm.strike,
-      expiry_date: atm.expiry,
+      strike_price: pick.strike,
+      expiry_date: pick.expiry,
       lot_size: lotSize,
       qty: quantity,
       opened_at: now,
@@ -276,9 +310,10 @@ async function openAtmPosition(admin: Admin, userId: string, p: EntryPayload): P
     console.warn(`[tv-engine] link write failed for ${p.strategy}/${symbol}:`, linkErr.message);
   }
 
+  const strikeNote = pick.byDelta ? `~${TV_WEBHOOK_CONFIG.engineTargetDelta}Δ` : "ATM";
   return {
     executed: true,
-    detail: `BUY ${quantity} ${symbol} ${atm.strike}${optionType} @ ₹${fill.executed_price} (${atm.source})`,
+    detail: `BUY ${quantity} ${symbol} ${pick.strike}${optionType} (${strikeNote}) @ ₹${fill.executed_price} → tgt ₹${target} / sl ₹${stopLoss} (${pick.source})`,
     orderId: order.id,
     positionId: position.id,
   };
@@ -438,10 +473,10 @@ export async function executeOnEngine(
   }
 
   if (payload.event === "entry") {
-    if (handled === "opened") return openAtmPosition(admin, userId, payload);
+    if (handled === "opened") return openOptionPosition(admin, userId, payload);
     if (handled === "reversed") {
       const closed = await closeLinkedPosition(admin, userId, payload.strategy, payload.symbol);
-      const opened = await openAtmPosition(admin, userId, payload);
+      const opened = await openOptionPosition(admin, userId, payload);
       return { ...opened, detail: `reverse → close[${closed.detail}] / open[${opened.detail}]` };
     }
     return { executed: false, detail: `entry ${handled} — no engine action` };

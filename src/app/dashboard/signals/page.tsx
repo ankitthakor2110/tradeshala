@@ -11,18 +11,19 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import { formatIndianCurrency, formatPercent, timeAgo } from "@/utils/format";
+import { formatIndianCurrency, formatPercent, formatDateTime, timeAgo } from "@/utils/format";
 import { getPnLColor } from "@/utils/colors";
 import { INTERACTION_CLASSES } from "@/styles/interactions";
 import { TV_DASHBOARD_COPY } from "@/config/tradingview";
 import { useIsMounted } from "@/hooks/useIsMounted";
 import { useTvLedger } from "@/hooks/useTvLedger";
+import { useEngineTrades } from "@/hooks/useEngineTrades";
 import { resetTvLedger } from "@/services/tradingview.service";
 import { computeAllStats, equityCurve, COMBINED_KEY } from "@/lib/tv/stats";
 import { showToast } from "@/components/ui/Toast";
 import Skeleton from "@/components/ui/Skeleton";
 import ButtonLoader from "@/components/ui/ButtonLoader";
-import type { TvPosition, TvTrade } from "@/types/tradingview";
+import type { TvPosition, TvTrade, EngineOpenPosition, EngineTrade } from "@/types/tradingview";
 
 const C = TV_DASHBOARD_COPY;
 const L = TV_DASHBOARD_COPY.labels;
@@ -100,6 +101,7 @@ function closedSortValue(t: TvTrade, key: ClosedSortKey): number | string {
 export default function SignalsPage() {
   const mounted = useIsMounted();
   const { open, closed, loading, lastUpdated, refresh } = useTvLedger();
+  const { open: engineOpen, closed: engineClosed, loading: engineLoading } = useEngineTrades();
   const [selected, setSelected] = useState<string>(COMBINED_KEY);
   const [confirmReset, setConfirmReset] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -192,6 +194,9 @@ export default function SignalsPage() {
         <p>{C.disclaimer}</p>
       </div>
 
+      {/* AUTOMATED ENGINE TRADES — the real option paper-trades + their exits */}
+      <EngineTradesSection open={engineOpen} closed={engineClosed} loading={engineLoading} />
+
       {/* RESET CONFIRM */}
       {confirmReset && (
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
@@ -214,6 +219,14 @@ export default function SignalsPage() {
           </div>
         </div>
       )}
+
+      {/* --- SIGNAL LEDGER (directional proxy) --- */}
+      <div className="pt-2 border-t border-gray-800/60">
+        <h2 className="text-sm md:text-base font-semibold text-white">Signal Ledger</h2>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Directional proxy (points × lot − costs) from every TradingView signal — not real option P&amp;L. Stats and equity below are for this ledger.
+        </p>
+      </div>
 
       {/* STRATEGY SELECTOR */}
       <div className="flex gap-1.5 flex-wrap">
@@ -387,6 +400,184 @@ export default function SignalsPage() {
           </div>
         )}
       </Section>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Automated engine trades — the REAL option paper-trades + their exits.
+// ===========================================================================
+const E = TV_DASHBOARD_COPY.engine;
+
+function heldTime(open: string | null, close: string | null): string {
+  if (!open || !close) return "—";
+  const ms = new Date(close).getTime() - new Date(open).getTime();
+  if (ms < 0) return "—";
+  const mins = Math.round(ms / 60000);
+  if (mins < 1) return "<1m";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ${mins % 60}m`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ${hrs % 24}h`;
+}
+
+function engineContract(t: { symbol: string; strike: number | null; optionType: "CE" | "PE"; expiry: string | null }): string {
+  const exp = t.expiry
+    ? new Date(t.expiry).toLocaleDateString("en-IN", { day: "numeric", month: "short" })
+    : "";
+  return `${t.symbol} ${t.strike ?? ""} ${t.optionType}${exp ? ` · ${exp}` : ""}`;
+}
+
+const lotsLabel = (qty: number, lotSize: number): string => {
+  if (lotSize > 1) {
+    const lots = qty / lotSize;
+    return `${qty} qty · ${lots} lot${lots !== 1 ? "s" : ""}`;
+  }
+  return `${qty} qty`;
+};
+
+function EngineReasonBadge({ reason }: { reason: EngineTrade["exitReason"] }) {
+  const cls: Record<EngineTrade["exitReason"], string> = {
+    target: "bg-green-500/10 text-green-400 border-green-500/20",
+    stop: "bg-red-500/10 text-red-400 border-red-500/20",
+    trail: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+    squareoff: "bg-sky-500/10 text-sky-400 border-sky-500/20",
+    scaleout: "bg-violet-500/10 text-violet-400 border-violet-500/20",
+    signal: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    manual: "bg-gray-700/40 text-gray-300 border-gray-600/30",
+  };
+  return (
+    <span className={`text-[11px] px-2 py-0.5 rounded-md border ${cls[reason]}`}>
+      {E.reasons[reason] ?? reason}
+    </span>
+  );
+}
+
+function EngineOpenCard({ p }: { p: EngineOpenPosition }) {
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 sm:p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-semibold text-white truncate">{engineContract(p)}</p>
+            <SideBadge side="long" />
+            <span className="flex items-center gap-1 text-[10px] text-green-400 border border-green-500/20 rounded px-1.5 py-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" aria-hidden />
+              {E.runningBadge}
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            {E.entered} {formatDateTime(p.openedAt)} · {E.held} {heldTime(p.openedAt, new Date().toISOString())} · {lotsLabel(p.qty, p.lotSize)}
+          </p>
+        </div>
+        <div className="text-right shrink-0">
+          <p className="text-xs text-gray-500">Entry</p>
+          <p className="text-sm font-semibold text-white">{formatIndianCurrency(p.entryPrice)}</p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs">
+        <span className="text-gray-500">🎯 Target <span className="text-green-400 font-medium">{p.target != null ? formatIndianCurrency(p.target) : "—"}</span></span>
+        <span className="text-gray-500">⛔ Stop <span className="text-red-400 font-medium">{p.stopLoss != null ? formatIndianCurrency(p.stopLoss) : "—"}</span></span>
+        {p.currentPrice != null && (
+          <span className="text-gray-500">Last <span className="text-gray-200 font-medium">{formatIndianCurrency(p.currentPrice)}</span></span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EngineClosedCard({ t }: { t: EngineTrade }) {
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 sm:p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-sm font-semibold text-white truncate">{engineContract(t)}</p>
+            <SideBadge side="long" />
+            <EngineReasonBadge reason={t.exitReason} />
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            {E.entered} {formatDateTime(t.openedAt)} · {E.exited} {formatDateTime(t.closedAt)} · {E.held} {heldTime(t.openedAt, t.closedAt)}
+          </p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {formatIndianCurrency(t.entryPrice)} → {formatIndianCurrency(t.exitPrice)} · {lotsLabel(t.qty, t.lotSize)} · <span className="text-gray-400">{t.strategy}</span>
+          </p>
+        </div>
+        <div className="text-right shrink-0">
+          <p className={`text-sm font-bold ${getPnLColor(t.net)}`}>{formatIndianCurrency(t.net, { sign: true })}</p>
+          <p className="text-xs text-gray-500">{formatPercent(t.pnlPercent, { sign: true })}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EngineTradesSection({
+  open,
+  closed,
+  loading,
+}: {
+  open: EngineOpenPosition[];
+  closed: EngineTrade[];
+  loading: boolean;
+}) {
+  const summary = useMemo(() => {
+    const net = closed.reduce((s, t) => s + t.net, 0);
+    const wins = closed.filter((t) => t.net > 0).length;
+    const winRate = closed.length ? (wins / closed.length) * 100 : 0;
+    return { count: closed.length, net, winRate };
+  }, [closed]);
+
+  return (
+    <div className="bg-gray-900/40 border border-violet-500/20 rounded-xl md:rounded-2xl p-3 md:p-5 space-y-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-sm md:text-base font-semibold text-white">{E.title}</h2>
+          <p className="text-xs text-gray-500 mt-0.5 max-w-2xl">{E.subtitle}</p>
+        </div>
+        {!loading && closed.length > 0 && (
+          <div className="flex items-center gap-3 text-xs shrink-0">
+            <span className="text-gray-500">{summary.count} closed</span>
+            <span className="text-gray-500">Win {formatPercent(summary.winRate)}</span>
+            <span className={`font-semibold ${getPnLColor(summary.net)}`}>{formatIndianCurrency(summary.net, { sign: true })}</span>
+          </div>
+        )}
+      </div>
+
+      {/* OPEN (running) */}
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wide">{E.openTitle}</h3>
+          <span className="text-[11px] text-gray-500 bg-gray-800 rounded-full px-2 py-0.5">{open.length}</span>
+        </div>
+        {loading ? (
+          <Skeleton variant="card" className="h-20" />
+        ) : open.length === 0 ? (
+          <p className="text-xs text-gray-500 py-3">{E.emptyOpen}</p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {open.map((p) => <EngineOpenCard key={p.id} p={p} />)}
+          </div>
+        )}
+      </div>
+
+      {/* CLOSED */}
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wide">{E.closedTitle}</h3>
+          <span className="text-[11px] text-gray-500 bg-gray-800 rounded-full px-2 py-0.5">{closed.length}</span>
+        </div>
+        {loading ? (
+          <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} variant="card" className="h-20" />)}</div>
+        ) : closed.length === 0 ? (
+          <p className="text-xs text-gray-500 py-3">{E.emptyClosed}</p>
+        ) : (
+          <div className="space-y-2">
+            {closed.map((t) => <EngineClosedCard key={t.id} t={t} />)}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

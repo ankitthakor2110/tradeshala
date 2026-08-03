@@ -48,6 +48,18 @@ export const TV_WEBHOOK_CONFIG = {
     process.env.WEBHOOK_TRADE_USER_EMAIL?.trim() ||
     process.env.ADMIN_EMAIL?.trim() ||
     null,
+  // --- Engine entry sizing / strike / bracket (option BUYING only) ---
+  // Strike is chosen as the contract whose |delta| is closest to this target
+  // (0.60 ≈ slightly ITM) using live chain greeks; falls back to ATM when greeks
+  // are missing (mock chain / provider without greeks).
+  engineTargetDelta: envNum("TV_ENGINE_TARGET_DELTA", 0.6),
+  // Number of lots to BUY per signal (× the symbol's lot size → total quantity;
+  // NIFTY 65 × 2 = 130). Overrides the payload qty so sizing is deterministic.
+  engineLots: envNum("TV_ENGINE_LOTS", 2),
+  // Bracket in OPTION-PREMIUM points: target = entry + N, stop = entry − N. The
+  // server GTT pass (runGttOnce) auto-exits when the live premium crosses either.
+  engineTargetPoints: envNum("TV_ENGINE_TARGET_POINTS", 10),
+  engineStopPoints: envNum("TV_ENGINE_STOP_POINTS", 10),
   // Refuse engine execution when the option chain only resolves to MOCK prices
   // (live providers down / token expired) — so simulator fills are never booked
   // at fabricated premiums. Default ON; set TV_ENGINE_REQUIRE_LIVE=false to allow
@@ -87,6 +99,32 @@ export const TV_DASHBOARD_COPY = {
   emptyOpen: "No open positions.",
   emptyClosed: "No closed trades yet.",
   pollIntervalMs: 3000,
+  // The "Automated Trades" section: the REAL option paper-trades the engine
+  // placed into the simulator (0.60Δ strike, live premium, auto 10-pt bracket),
+  // as opposed to the directional-proxy ledger above.
+  engine: {
+    title: "Automated Trades",
+    subtitle:
+      "Real option paper-trades placed from signals — ~0.60Δ strike, live premium, auto target/stop. Shown only when signed in as the configured trade account.",
+    openTitle: "Open (running)",
+    closedTitle: "Closed",
+    emptyOpen: "No automated positions open right now.",
+    emptyClosed:
+      "No automated trades yet. Needs TV_ENGINE_EXECUTION on and you signed in as the configured trade account.",
+    runningBadge: "running",
+    entered: "Entered",
+    exited: "Exited",
+    held: "held",
+    reasons: {
+      target: "Target hit",
+      stop: "Stop-loss",
+      trail: "Trailing stop",
+      squareoff: "Square-off (EOD)",
+      scaleout: "Scale-out",
+      signal: "Exit signal",
+      manual: "Manual / other",
+    } as Record<string, string>,
+  },
   labels: {
     strategy: "Strategy",
     side: "Side",
