@@ -302,6 +302,25 @@ export default function TradePage() {
     setModalOpen(true); fetchQuote(symbol, exchange);
   }
 
+  // Deep-link: /dashboard/trade?symbol=RELIANCE&name=…&exchange=NSE&type=CE opens
+  // the ticket straight onto that instrument's option chain — used by the Trade
+  // Finder "Trade" action. Read from window once (no Suspense needed) and clear
+  // the query so a refresh/back doesn't re-open the ticket.
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    deepLinkHandled.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const symbol = params.get("symbol");
+    if (!symbol) return;
+    const name = params.get("name") ?? symbol;
+    const exchange = params.get("exchange") ?? "NSE";
+    const side = params.get("type") === "PE" ? "PE" : "CE";
+    openTradeModal(symbol.toUpperCase(), name, exchange, side);
+    window.history.replaceState(null, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
+  }, []);
+
   // Lazily fetch + cache the full chain for another expiry (calendar legs).
   const loadChainFor = useCallback(async (expiry: string) => {
     if (!selectedSymbol || chainsByExpiry[expiry]) return;
