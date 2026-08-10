@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { FINDER_CONFIG } from "@/config/finder";
 import { deriveRowSignals } from "@/lib/finder/screener";
 import { equityConviction, type ConvictionLabel } from "@/lib/finder/rank";
@@ -54,6 +55,16 @@ function RangeGauge({ pos }: { pos: number | null }) {
 }
 
 export default function ScreenerTable({ rows, config, setConfig, dealSymbols }: ScreenerTableProps) {
+  const router = useRouter();
+
+  // Deep-link to the Trade ticket with this stock's option chain open. Every
+  // finder name is F&O, so we always land on the CE side ready to trade.
+  const tradeHref = (r: ScreenerRow) => {
+    const name = FINDER_CONFIG.universe.find((u) => u.symbol === r.symbol)?.name ?? r.symbol;
+    const q = new URLSearchParams({ symbol: r.symbol, name, exchange: r.exchange, type: "CE" });
+    return `/dashboard/trade?${q.toString()}`;
+  };
+
   // A header click sorts by that column; toggles direction if already active.
   // Switches to the "all" preset so the manual sort actually takes effect
   // (gainers/losers/high-volume presets impose their own ordering).
@@ -102,12 +113,15 @@ export default function ScreenerTable({ rows, config, setConfig, dealSymbols }: 
             return (
               <tr
                 key={r.symbol}
-                className="group border-b border-gray-800/60 transition-colors hover:bg-gray-800/40"
+                onClick={() => router.push(tradeHref(r))}
+                title={`Trade ${r.symbol} options`}
+                className="group cursor-pointer border-b border-gray-800/60 transition-colors hover:bg-gray-800/40"
               >
                 <td className="px-4 py-3">
                   <Link
-                    href="/dashboard/trade"
-                    title={`Trade ${r.symbol}`}
+                    href={tradeHref(r)}
+                    title={`Trade ${r.symbol} options`}
+                    onClick={(e) => e.stopPropagation()}
                     className="cursor-pointer font-semibold text-white transition-colors group-hover:text-violet-300"
                   >
                     {r.symbol}

@@ -22,7 +22,7 @@ export const FINDER_CONFIG = {
   page: {
     title: "Trade Finder",
     subtitle:
-      "Live multi-stock momentum screener — scan the most liquid NSE names, ranked by real-time price action. Every value is a live provider quote; nothing is simulated.",
+      "Live momentum screener for options-enabled (F&O) NSE stocks, ranked by real-time price action. Click any name to open its option chain and trade. Every value is a live provider quote; nothing is simulated.",
     refreshLabel: "Refresh now",
     emptyLive: "No live market data right now. It refreshes automatically, or use “Refresh now”.",
     emptyUnavailable:
@@ -30,7 +30,9 @@ export const FINDER_CONFIG = {
   },
 
   /**
-   * The scan set — a curated list of highly-liquid NSE large-caps. Symbols are
+   * The scan set — curated highly-liquid NSE large-caps that are ALL F&O
+   * (options-enabled) names, so every row can deep-link straight into a live
+   * option chain on the Trade page. Do not add cash-only stocks here. Symbols are
    * resolved to live quotes server-side via the provider aggregator; keep this
    * list to names the providers reliably resolve. Bounded to keep each scan a
    * light, single batch of provider calls.
