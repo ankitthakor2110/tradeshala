@@ -1,5 +1,6 @@
 import { DHAN_UNDERLYING } from "@/lib/market-data/option-chain";
 import { getSharedUpstoxToken } from "@/lib/market-data/upstox";
+import { resolveEquityKey } from "@/lib/market-data/upstox-instruments";
 
 // Shared option-expiry resolution (Dhan → Upstox → generated fallback). Used by
 // the /api/trade/expiries route AND the TradingView engine bridge, so both pick
@@ -131,7 +132,8 @@ async function fetchUpstoxExpiries(symbol: string): Promise<string[] | null> {
     SENSEX: "BSE_INDEX|SENSEX",
   };
 
-  const instrumentKey = instrumentMap[symbol];
+  // Indices use name-based keys; stocks resolve to their ISIN-based equity key.
+  const instrumentKey = instrumentMap[symbol] ?? (await resolveEquityKey(symbol));
   if (!instrumentKey) return null;
 
   try {

@@ -41,11 +41,19 @@ function calcAtm(price: number, symbol: string): number {
   return Math.round(price / gap) * gap;
 }
 
-function filterStrikes(chain: OptionChainData[], atm: number, symbol: string, range: number): OptionChainData[] {
-  const gap = STRIKE_GAP[symbol] ?? 5;
-  const strikes: number[] = [];
-  for (let i = -range; i <= range; i++) strikes.push(atm + i * gap);
-  return chain.filter((r) => strikes.includes(r.strike_price)).sort((a, b) => a.strike_price - b.strike_price);
+// Take `range` strikes on each side of ATM from the actual strike ladder, by
+// index — gap-free, so it works for indices (gap 50/100) and stocks (gap 10/20/…)
+// alike without a per-symbol gap table.
+function filterStrikes(chain: OptionChainData[], atm: number, range: number): OptionChainData[] {
+  const sorted = [...chain].sort((a, b) => a.strike_price - b.strike_price);
+  if (sorted.length === 0) return [];
+  let atmIdx = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    if (Math.abs(sorted[i].strike_price - atm) < Math.abs(sorted[atmIdx].strike_price - atm)) atmIdx = i;
+  }
+  const lo = Math.max(0, atmIdx - range);
+  const hi = Math.min(sorted.length - 1, atmIdx + range);
+  return sorted.slice(lo, hi + 1);
 }
 
 // Moneyness of a strike for a given option side, relative to the ATM strike.
@@ -217,7 +225,11 @@ export default function TradePage() {
       .then((d) => {
         const incoming: OptionChainData[] = d.chain ?? [];
         const underlying = d.underlyingPrice ?? quote?.last_price ?? 0;
-        const atm = calcAtm(underlying, selectedSymbol);
+        // Prefer the server's ATM (nearest listed strike from the live feed); fall
+        // back to the gap-based estimate only when the feed didn't supply one.
+        const atm = typeof d.atmStrike === "number" && d.atmStrike > 0
+          ? d.atmStrike
+          : calcAtm(underlying, selectedSymbol);
         setAtmStrike(atm);
         setFullChain(incoming);
         if (selectedExpiry) setChainsByExpiry((prev) => ({ ...prev, [selectedExpiry]: incoming }));
@@ -337,8 +349,8 @@ export default function TradePage() {
   // strategy builder and metrics read this; the table additionally applies the
   // moneyness filter below.
   const chain = useMemo(
-    () => filterStrikes(fullChain, atmStrike, selectedSymbol, strikeRange),
-    [fullChain, atmStrike, selectedSymbol, strikeRange]
+    () => filterStrikes(fullChain, atmStrike, strikeRange),
+    [fullChain, atmStrike, strikeRange]
   );
 
   // Live option streaming: register the visible window's contracts so the

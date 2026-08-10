@@ -1,5 +1,7 @@
 import type { OptionChainData } from "@/types/database";
 import { getSharedUpstoxToken } from "@/lib/market-data/upstox";
+import { resolveEquityKey } from "@/lib/market-data/upstox-instruments";
+import { getQuote } from "@/lib/market-data";
 
 // Shared server-side option-chain fetch (Dhan → Upstox → mock). Used by the
 // /api/trade/option-chain route, the GTT executor, and the IV-history writer so
@@ -139,7 +141,10 @@ async function fetchUpstox(symbol: string, expiry: string): Promise<ChainRespons
     SENSEX: "BSE_INDEX|SENSEX",
   };
 
-  const instrumentKey = instrumentMap[symbol];
+  // Indices use name-based keys (above); everything else is a stock — resolve its
+  // ISIN-based equity key (NSE_EQ|<ISIN>) from the instrument master. Non-F&O
+  // stocks resolve fine here but return an empty chain from the API (no options).
+  const instrumentKey = instrumentMap[symbol] ?? (await resolveEquityKey(symbol));
   if (!instrumentKey) return null;
 
   try {
@@ -159,8 +164,16 @@ async function fetchUpstox(symbol: string, expiry: string): Promise<ChainRespons
     if (!rows.length) return null;
 
     const underlying = (rows[0]?.underlying_spot_price as number) ?? 0;
-    const gap = STRIKE_GAPS[symbol] ?? 50;
-    const atm = Math.round(underlying / gap) * gap;
+    // Prefer the actual strike ladder from the feed (stock gaps vary per name and
+    // aren't in STRIKE_GAPS); fall back to the index map, then 50. ATM is the
+    // listed strike nearest to spot, so it always exists in the returned chain.
+    const strikes = rows
+      .map((r) => (r.strike_price as number) ?? 0)
+      .filter((s) => s > 0)
+      .sort((a, b) => a - b);
+    const atm = strikes.length
+      ? strikes.reduce((best, s) => (Math.abs(s - underlying) < Math.abs(best - underlying) ? s : best), strikes[0])
+      : Math.round(underlying / (STRIKE_GAPS[symbol] ?? 50)) * (STRIKE_GAPS[symbol] ?? 50);
 
     const chain: OptionChainData[] = rows.map((row) => {
       const ce = row.call_options as Record<string, unknown> | undefined;
@@ -212,10 +225,19 @@ async function fetchUpstox(symbol: string, expiry: string): Promise<ChainRespons
 function r2(n: number) { return Math.round(n * 100) / 100; }
 function r4(n: number) { return Math.round(n * 10000) / 10000; }
 
-export function generateMockChain(symbol: string, expiry: string): ChainResponse {
+// A plausible strike interval for a stock at `price`, snapped to the nearest
+// exchange-like step (~0.5–1% of price). Used only by the mock when a symbol
+// has no live chain, so strikes bracket the real quote instead of ₹24,000.
+function niceStrikeGap(price: number): number {
+  const steps = [1, 2.5, 5, 10, 20, 25, 50, 100, 200, 500];
+  const target = price * 0.01;
+  return steps.reduce((best, s) => (Math.abs(s - target) < Math.abs(best - target) ? s : best), steps[0]);
+}
+
+export function generateMockChain(symbol: string, expiry: string, anchorPrice?: number): ChainResponse {
   const underlyingPrices: Record<string, number> = { NIFTY: 24050, BANKNIFTY: 55900, FINNIFTY: 23800, SENSEX: 79500 };
-  const underlying = underlyingPrices[symbol] ?? 24000;
-  const gap = STRIKE_GAPS[symbol] ?? 50;
+  const underlying = anchorPrice && anchorPrice > 0 ? anchorPrice : (underlyingPrices[symbol] ?? 24000);
+  const gap = STRIKE_GAPS[symbol] ?? niceStrikeGap(underlying);
   const atm = Math.round(underlying / gap) * gap;
 
   let totalCeOI = 0;
@@ -289,5 +311,9 @@ export async function fetchOptionChain(symbol: string, expiry: string): Promise<
   if (dhan && dhan.chain.length > 0) return dhan;
   const upstox = await fetchUpstox(symbol, expiry);
   if (upstox && upstox.chain.length > 0) return upstox;
-  return generateMockChain(symbol, expiry);
+  // No live chain (non-F&O stock, or feed down): anchor the mock to the real
+  // underlying quote so strikes bracket the actual price rather than a stale
+  // index-shaped default. Indices carry their own default when the quote misses.
+  const quote = await getQuote(symbol).catch(() => null);
+  return generateMockChain(symbol, expiry, quote?.data?.last_price);
 }
