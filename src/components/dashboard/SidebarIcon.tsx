@@ -44,6 +44,12 @@ export default function SidebarIcon({
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
         </svg>
       );
+    case "finder":
+      return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-4.35-4.35M11 6a5 5 0 015 5m4 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      );
     case "journal":
       return (
         <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">

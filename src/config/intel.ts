@@ -13,6 +13,19 @@ export const INTEL_CONFIG = {
     candleInterval: "1minute" as "1minute" | "30minute",
   },
 
+  // Symbols the dashboard can analyse. Restricted to indices that have BOTH a
+  // real option chain AND real intraday candles (see option-chain.ts / the
+  // candles route) — so no panel is ever computed from mock prices. `liveSymbol`
+  // is the live_quotes Realtime key (null when the index isn't streamed; the
+  // spot then falls back to the chain underlying, still real). The first entry
+  // is the default when no `?symbol=` is given.
+  symbols: [
+    { key: "NIFTY", label: "NIFTY", liveSymbol: "NIFTY 50", interval: "1minute" as const },
+    { key: "BANKNIFTY", label: "BANK NIFTY", liveSymbol: "BANK NIFTY", interval: "1minute" as const },
+    { key: "FINNIFTY", label: "FIN NIFTY", liveSymbol: null, interval: "1minute" as const },
+    { key: "SENSEX", label: "SENSEX", liveSymbol: "SENSEX", interval: "1minute" as const },
+  ] as { key: string; label: string; liveSymbol: string | null; interval: "1minute" | "30minute" }[],
+
   // Data-provenance badge copy. The honesty primitive — every panel shows one.
   provenance: {
     live: { label: "LIVE", hint: "Live provider feed" },

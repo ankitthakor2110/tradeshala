@@ -113,16 +113,27 @@ function resolveEventRisk(expiry: string | null) {
   );
 }
 
+/** Resolve a supported symbol config by key; falls back to the default (first). */
+function resolveSymbol(key?: string) {
+  const list = INTEL_CONFIG.symbols;
+  return list.find((s) => s.key === key) ?? list[0];
+}
+
 /**
  * The Market Intelligence brain. Polls the option chain + candles on the chosen
  * cadence, computes SESSION OI deltas (providers report 0), merges the live spot
  * from Realtime, and runs the pure src/lib/intel/* logic into a single
  * `IntelState`. Also drives `useSnapshotPoller` so the shared live feed stays warm.
+ *
+ * Pass a supported symbol key (see INTEL_CONFIG.symbols) to analyse a different
+ * index; omitted → the default (NIFTY). Only indices with real chains AND real
+ * candles are analysable, so no panel is ever built on mock prices.
  */
-export function useIntelData() {
-  const symbol = INTEL_CONFIG.page.symbol;
-  const interval = INTEL_CONFIG.page.candleInterval;
-  const liveSymbol = INTEL_CONFIG.page.liveSymbol;
+export function useIntelData(symbolKey?: string) {
+  const cfg = resolveSymbol(symbolKey);
+  const symbol = cfg.key;
+  const interval = cfg.interval;
+  const liveSymbol = cfg.liveSymbol;
 
   const [config, setConfigState] = useState<IntelConfigState>(loadConfig);
   const [expiry, setExpiry] = useState<string | null>(null);
@@ -140,9 +151,9 @@ export function useIntelData() {
   const inFlight = useRef(false);
   const spotRef = useRef(0); // latest spot, for the candle mock anchor — kept off poll deps
 
-  const liveMemo = useMemo(() => [liveSymbol], [liveSymbol]);
+  const liveMemo = useMemo(() => (liveSymbol ? [liveSymbol] : []), [liveSymbol]);
   const { quotes, isLive } = useLiveQuotes(liveMemo);
-  const liveQuote = quotes[liveSymbol];
+  const liveQuote = liveSymbol ? quotes[liveSymbol] : undefined;
   useSnapshotPoller(true);
 
   useEffect(() => {
@@ -161,11 +172,26 @@ export function useIntelData() {
     });
   }, []);
 
-  // Resolve the nearest expiry once.
+  // When the analysed symbol changes, clear all session state so nothing from
+  // the previous symbol (chain, deltas, baseline, candles) leaks into the new one.
+  useEffect(() => {
+    prevSnapRef.current = new Map();
+    pollCountRef.current = 0;
+    baselineSRRef.current = null;
+    setExpiry(null);
+    setRawChain(null);
+    setDeltas({});
+    setCandles([]);
+    setCandleSource("unavailable");
+    setLastUpdated(null);
+    setLoading(true);
+  }, [symbol]);
+
+  // Resolve the nearest expiry for the current symbol.
   useEffect(() => {
     let active = true;
     void getExpiriesFor(symbol).then((xs) => {
-      if (active && xs.length) setExpiry((cur) => cur ?? xs[0]);
+      if (active && xs.length) setExpiry(xs[0]);
     });
     return () => {
       active = false;
@@ -403,6 +429,8 @@ export function useIntelData() {
     if (!rawChain || !chainBlock) {
       return {
         ...EMPTY_STATE,
+        symbol,
+        expiry,
         lastUpdated,
         candleSource,
         warmingUp: pollCountRef.current < 2,

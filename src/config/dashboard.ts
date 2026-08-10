@@ -10,6 +10,7 @@ export const dashboardConfig = {
     items: [
       { label: "Dashboard", href: "/dashboard", icon: "grid" },
       { label: "Market Intel", href: "/dashboard/intel", icon: "activity" },
+      { label: "Trade Finder", href: "/dashboard/finder", icon: "finder" },
       { label: "Trade", href: "/dashboard/trade", icon: "trade" },
       { label: "Positions", href: "/dashboard/positions", icon: "positions" },
       { label: "Signals", href: "/dashboard/signals", icon: "signal" },
@@ -29,6 +30,7 @@ export const dashboardConfig = {
     pageTitles: {
       "/dashboard": "Dashboard",
       "/dashboard/intel": "Market Intelligence",
+      "/dashboard/finder": "Trade Finder",
       "/dashboard/portfolio": "Portfolio",
       "/dashboard/trade": "Trade Simulator",
       "/dashboard/trades": "Trades",
