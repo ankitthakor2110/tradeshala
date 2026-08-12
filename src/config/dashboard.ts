@@ -101,7 +101,7 @@ export const dashboardConfig = {
   ] as IndexData[],
 
   mockGainers: [
-    { symbol: "TATAMOTORS", change: 18.5, changePercent: 3.2, isPositive: true },
+    { symbol: "TMPV", change: 18.5, changePercent: 3.2, isPositive: true },
     { symbol: "RELIANCE", change: 68.4, changePercent: 2.8, isPositive: true },
     { symbol: "HDFCBANK", change: 32.1, changePercent: 2.1, isPositive: true },
     { symbol: "INFY", change: 28.6, changePercent: 1.9, isPositive: true },

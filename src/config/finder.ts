@@ -51,7 +51,7 @@ export const FINDER_CONFIG = {
     { symbol: "KOTAKBANK", name: "Kotak Mahindra Bank" },
     { symbol: "HINDUNILVR", name: "Hindustan Unilever" },
     { symbol: "WIPRO", name: "Wipro" },
-    { symbol: "TATAMOTORS", name: "Tata Motors" },
+    { symbol: "TMPV", name: "Tata Motors PV" },
     { symbol: "BAJFINANCE", name: "Bajaj Finance" },
     { symbol: "MARUTI", name: "Maruti Suzuki" },
     { symbol: "SUNPHARMA", name: "Sun Pharma" },
