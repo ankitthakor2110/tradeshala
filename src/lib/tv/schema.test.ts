@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { normalizeInbound, isActionPayload, validateWebhook } from "./schema";
+import {
+  normalizeInbound,
+  isActionPayload,
+  validateWebhook,
+  repairLooseJson,
+  parseLooseJson,
+} from "./schema";
 
 // ---------------------------------------------------------------------------
 // normalizeInbound — broker-style TradingView alert -> canonical webhook shape
@@ -170,5 +176,52 @@ describe("isActionPayload", () => {
   it("does not treat SELL_PE or a canonical side as an action payload", () => {
     expect(isActionPayload({ side: "SELL_PE" })).toBe(false);
     expect(isActionPayload({ side: "long", event: "entry" })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lenient JSON parse — repair the leading-dot-decimal alert-message typo
+// ---------------------------------------------------------------------------
+describe("repairLooseJson", () => {
+  it("adds the missing leading zero after a colon", () => {
+    expect(repairLooseJson(`{"delta":.60}`)).toBe(`{"delta":0.60}`);
+  });
+  it("repairs negative and array/comma-position leading dots", () => {
+    expect(repairLooseJson(`{"a":-.5,"b":.25,"c":[.1,.2]}`)).toBe(
+      `{"a":-0.5,"b":0.25,"c":[0.1,0.2]}`
+    );
+  });
+  it("tolerates whitespace between the separator and the dot", () => {
+    expect(repairLooseJson(`{"x": .5}`)).toBe(`{"x": 0.5}`);
+  });
+  it("leaves well-formed numbers and dotted strings untouched", () => {
+    const ok = `{"a":0.6,"b":"v1.0","id":"foo.60","t":1786689540000}`;
+    expect(repairLooseJson(ok)).toBe(ok);
+  });
+});
+
+describe("parseLooseJson", () => {
+  // The exact ENTRY body from production that was being rejected: `"delta":.60`.
+  const badEntry = `{"event":"entry","seq":2,"strategy":"Confluence-Scalper-v2","symbol":"NIFTY","side":"long","option_type":"CALL","timeframe":"3","price":24341.5,"sl":24331.5,"tp":24351.5,"sl_points":10,"tp_points":10,"delta":.60,"lots":2,"qty":1,"time":1786689540000,"id":"Confluence-Scalper-v2-CE-1786689540000"}`;
+
+  it("recovers a payload that fails strict JSON due to a leading-dot decimal", () => {
+    const parsed = parseLooseJson(badEntry);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.event).toBe("entry");
+    expect(parsed!.delta).toBe(0.6);
+    // ...and the repaired object validates as a real entry signal.
+    const result = validateWebhook(normalizeInbound(parsed!));
+    expect(result.ok).toBe(true);
+  });
+
+  it("parses well-formed JSON without altering it", () => {
+    const parsed = parseLooseJson(`{"event":"exit","strategy":"S","symbol":"NIFTY","price":24351.5}`);
+    expect(parsed).toEqual({ event: "exit", strategy: "S", symbol: "NIFTY", price: 24351.5 });
+  });
+
+  it("returns null for genuinely unparseable bodies and non-objects", () => {
+    expect(parseLooseJson("not json at all")).toBeNull();
+    expect(parseLooseJson("[1,2,3]")).toBeNull(); // array is not an object payload
+    expect(parseLooseJson("42")).toBeNull();
   });
 });
