@@ -1,7 +1,7 @@
 import { NextRequest, after } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TV_WEBHOOK_CONFIG } from "@/config/tradingview";
-import { validateWebhook, normalizeInbound, isActionPayload } from "@/lib/tv/schema";
+import { validateWebhook, normalizeInbound, isActionPayload, parseLooseJson } from "@/lib/tv/schema";
 import { secretsMatch, ipAllowed, dedupeKey } from "@/lib/tv/engine";
 import { insertLog, updateLog, isDuplicate, applySignal } from "@/lib/tv/processor";
 // executeOnEngine (@/services/trade-engine.server) and the Telegram notifier
@@ -52,14 +52,12 @@ export async function POST(req: NextRequest) {
 
   // Read the raw body and JSON-parse it regardless of content-type (TradingView
   // sends text/plain when the body isn't auto-detected as JSON).
+  // Lenient parse: strict JSON first (valid payloads untouched), with a single
+  // repair retry for the common leading-dot-decimal typo (`"delta":.60`) that
+  // TradingView alert messages often contain and that would otherwise reject the
+  // whole signal as invalid JSON.
   const raw = await req.text();
-  let parsed: Record<string, unknown> | null = null;
-  try {
-    const v = JSON.parse(raw);
-    if (v && typeof v === "object") parsed = v as Record<string, unknown>;
-  } catch {
-    parsed = null;
-  }
+  const parsed = parseLooseJson(raw);
 
   // --- AUTH (cheap, in-memory) — the only work that runs before the 200. ---
   // These gates reject unauthenticated callers fast (no DB), so they can't spam

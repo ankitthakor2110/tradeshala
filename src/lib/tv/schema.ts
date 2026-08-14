@@ -166,6 +166,49 @@ export function normalizeInbound(raw: Record<string, unknown>): Record<string, u
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Lenient JSON parsing (repair the most common TradingView alert-message typo)
+// ---------------------------------------------------------------------------
+//
+// TradingView alert messages are hand-edited JSON. The most common mistake is a
+// leading-dot decimal — e.g. `"delta":.60` — which is INVALID JSON (a JSON
+// number must have a leading zero: `0.60`). One such character silently rejects
+// the whole payload (`Body is not valid JSON`), which for an ENTRY signal means
+// no position opens, no engine order, no Telegram alert. This repairs that class
+// of typo so a stray dot can't kill a trading session.
+
+/**
+ * Repair leading-dot decimals in a JSON string: `:.60` -> `:0.60`, `-.5` ->
+ * `-0.5`, `[.5` -> `[0.5`. Only touches a `.` that directly follows a value
+ * position (`:`, `,`, `[`, optional sign, optional whitespace), so numbers and
+ * string contents in well-formed JSON are left untouched. Pure, no I/O.
+ */
+export function repairLooseJson(raw: string): string {
+  return raw.replace(/([:,[]\s*-?)\.(\d)/g, "$10.$2");
+}
+
+/**
+ * Parse a webhook body leniently: try strict JSON first (so valid payloads are
+ * never altered), and only if that throws, retry once after `repairLooseJson`.
+ * Returns the parsed object, or null if it still isn't a JSON object.
+ */
+export function parseLooseJson(raw: string): Record<string, unknown> | null {
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try {
+      const v = JSON.parse(s);
+      return v && typeof v === "object" && !Array.isArray(v)
+        ? (v as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const strict = tryParse(raw);
+  if (strict !== null) return strict;
+  const repaired = repairLooseJson(raw);
+  return repaired === raw ? null : tryParse(repaired);
+}
+
 /** Validate a parsed JSON object. Returns a 422-ready message naming the bad field. */
 export function validateWebhook(input: unknown): ValidationResult {
   const parsed = webhookSchema.safeParse(input);
