@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run lint` — Run ESLint (flat config, Next.js core-web-vitals + TypeScript)
 - `npm test` — Run Vitest once (`vitest run`); `npm run test:watch` for watch mode
 - `npm run ws:upstox` — Run the standalone Upstox WebSocket market-data feed script (`scripts/upstox-ws.mjs`, loads `.env.local`)
+- `npm run nse:deals` — Run the standalone NSE large-deals snapshot writer (`scripts/nse-largedeals.mjs`, loads `.env.local`); fetches NSE bulk/block/short deals and upserts the shared `large_deals` table. Run from a machine where NSE is reachable (NSE blocks datacenter IPs), scheduled ~10-min during market hours.
 - `npm run tv:test` — Send a test TradingView webhook payload (`scripts/tv-webhook-test.mjs`)
 
 Vitest (`vitest.config.ts`, `node` environment, `@` alias) tests **pure logic only** — it has no Next/React/DOM env. Test files are colocated as `*.test.ts` (currently `src/lib/tv/engine.test.ts`, `src/lib/tv/stats.test.ts`, `src/lib/tv/schema.test.ts`, `src/lib/tv/notify.test.ts`, `src/lib/portfolio/summary.test.ts`). Run a single file with `npx vitest run src/lib/tv/engine.test.ts`. Full verification is `npm test` + `npm run lint` + `npm run build`. Do **not** write DOM/component tests against this config — keep logic pure and testable, and put side-effecting DB/env code in the processor/service layers.

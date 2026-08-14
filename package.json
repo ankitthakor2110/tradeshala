@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "ws:upstox": "node --env-file=.env.local scripts/upstox-ws.mjs",
+    "nse:deals": "node --env-file=.env.local scripts/nse-largedeals.mjs",
     "tv:test": "node --env-file=.env.local scripts/tv-webhook-test.mjs"
   },
   "dependencies": {

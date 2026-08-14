@@ -101,12 +101,15 @@ export function rankRows(
 
 /**
  * Apply the active preset + noise floor. `watchlist` is a set of symbols the
- * user is watching (empty set ⇒ the watchlist preset yields no rows).
+ * user is watching (empty set ⇒ the watchlist preset yields no rows). `surges`
+ * is the set of symbols flagged with unusual volume this session (empty ⇒ the
+ * unusualVolume preset yields no rows until the baseline warms up).
  */
 export function applyFilters(
   rows: ScreenerRow[],
   filters: ScreenerFilters,
-  watchlist: Set<string>
+  watchlist: Set<string>,
+  surges: Set<string> = new Set()
 ): ScreenerRow[] {
   const floor = Math.max(0, filters.minAbsChangePct);
   let out = rows.filter((r) => Math.abs(r.change_percent) >= floor);
@@ -120,6 +123,9 @@ export function applyFilters(
       break;
     case "watchlist":
       out = out.filter((r) => watchlist.has(r.symbol));
+      break;
+    case "unusualVolume":
+      out = out.filter((r) => surges.has(r.symbol));
       break;
     case "highVolume":
     case "all":
@@ -146,6 +152,7 @@ export function effectiveSort(
     case "losers":
       return { key: "changePercent", dir: "asc" };
     case "highVolume":
+    case "unusualVolume":
       return { key: "volume", dir: "desc" };
     default:
       return { key, dir };
@@ -158,9 +165,10 @@ export function buildScreenerView(
   filters: ScreenerFilters,
   key: ScreenerSortKey,
   dir: SortDir,
-  watchlist: Set<string>
+  watchlist: Set<string>,
+  surges: Set<string> = new Set()
 ): ScreenerRow[] {
-  const filtered = applyFilters(rows, filters, watchlist);
+  const filtered = applyFilters(rows, filters, watchlist, surges);
   const s = effectiveSort(filters, key, dir);
   return rankRows(filtered, s.key, s.dir);
 }

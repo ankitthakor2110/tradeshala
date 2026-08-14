@@ -75,6 +75,7 @@ export const FINDER_CONFIG = {
     { key: "gainers", label: "Top Gainers", hint: "Positive movers, biggest first" },
     { key: "losers", label: "Top Losers", hint: "Negative movers, biggest first" },
     { key: "highVolume", label: "High Volume", hint: "Most actively traded" },
+    { key: "unusualVolume", label: "Unusual Volume", hint: "Volume accelerating vs the session's pace" },
     { key: "watchlist", label: "My Watchlist", hint: "Only symbols on your watchlist" },
   ] as PresetDef[],
 
@@ -111,6 +112,19 @@ export const FINDER_CONFIG = {
     note: "Alerts post to the configured Telegram chat when a scanned symbol's absolute move crosses your threshold (10-minute per-symbol cooldown).",
   },
 
+  // Unusual-volume signal — self-computed from successive live polls (the
+  // providers give no volume baseline). A symbol is flagged when its most recent
+  // interval's volume rate outpaces this session's running pace by `surgeThreshold`.
+  volume: {
+    surgeThreshold: 3, // recent interval rate ≥ 3× the session baseline
+    minSamples: 3, // need ≥3 prior interval samples before flagging (no cold-start noise)
+    maxSamples: 30, // rolling window of interval rates kept per symbol
+    badgeLabel: "VOL",
+    badgeHint: "Volume is accelerating vs this session's pace (self-computed from live polls).",
+    caveat:
+      "“Unusual Volume” is computed in-browser from successive live polls — the baseline builds during the session and resets on reload, so it needs a few polls before it flags. Not exchange-reported.",
+  },
+
   refresh: {
     options: [
       { label: "10s", ms: 10000 },
@@ -122,6 +136,18 @@ export const FINDER_CONFIG = {
 
   provenanceNote:
     "Prices, % change and volume are LIVE from the market-data provider. Day-range position is DERIVED from the session's OHLC.",
+
+  // Event risk — a market-wide trade gate around scheduled high-impact prints
+  // (RBI / FOMC / US CPI) + the weekly F&O expiry. The macro calendar is
+  // auto-fetched (FMP); the expiry is derived from the live expiry feed. Reuses
+  // the pure event engine + window/label knobs from INTEL_CONFIG.events.
+  events: {
+    cautionStrip:
+      "A high-impact event window is open — a scheduled print can whipsaw any setup below. Size down or stand aside.",
+    dimNote: "Setups are dimmed while a high-impact event window is open — this is a market-wide gate, not a per-stock signal.",
+    disclaimer:
+      "Macro event times are scheduled estimates (auto-fetched); the weekly expiry is derived from the live feed. Verify against official sources — release times can shift. FMP's free tier is strongest on global (US/EU) prints; India-specific coverage may be partial.",
+  },
 
   // Large Deals — NSE-reported bulk/block/short transactions ("smart money").
   largeDeals: {

@@ -10,17 +10,22 @@ import FilterBar from "@/components/finder/FilterBar";
 import ScreenerTable from "@/components/finder/ScreenerTable";
 import IndexIntel from "@/components/finder/IndexIntel";
 import LargeDeals from "@/components/finder/LargeDeals";
+import EventRiskPanel from "@/components/intel/EventRiskPanel";
 import { useLargeDeals } from "@/hooks/useLargeDeals";
+import { useEventRisk } from "@/hooks/useEventRisk";
+import { eventTreatment } from "@/lib/finder/eventfilter";
 import { timeAgo } from "@/utils/format";
 
 export default function TradeFinderPage() {
   const mounted = useIsMounted();
-  const { view, loading, source, lastUpdated, config, setConfig, refresh } = useScreener();
+  const { view, loading, source, lastUpdated, surges, config, setConfig, refresh } = useScreener();
   const largeDeals = useLargeDeals();
+  const eventRisk = useEventRisk();
 
   if (!mounted) return null;
 
   const unavailable = !loading && source === "unavailable";
+  const treatment = eventTreatment(eventRisk?.gate ?? "ok");
 
   return (
     <div className="mx-auto max-w-6xl space-y-5 sm:space-y-6">
@@ -44,6 +49,20 @@ export default function TradeFinderPage() {
         </div>
       </div>
 
+      <EventRiskPanel eventRisk={eventRisk} />
+
+      {treatment.level !== "clear" && (
+        <div
+          className={`rounded-lg border px-3 py-2 text-xs ${
+            treatment.tone === "red"
+              ? "border-red-500/40 bg-red-500/10 text-red-200"
+              : "border-amber-500/40 bg-amber-500/10 text-amber-200"
+          }`}
+        >
+          {FINDER_CONFIG.events.cautionStrip}
+        </div>
+      )}
+
       <IndexIntel />
 
       {loading ? (
@@ -58,7 +77,19 @@ export default function TradeFinderPage() {
       ) : (
         <>
           <FilterBar config={config} setConfig={setConfig} count={view.length} />
-          <ScreenerTable rows={view} config={config} setConfig={setConfig} dealSymbols={largeDeals.symbols} />
+          <div className={treatment.dim ? "opacity-50 transition-opacity" : "transition-opacity"}>
+            <ScreenerTable
+              rows={view}
+              config={config}
+              setConfig={setConfig}
+              dealSymbols={largeDeals.symbols}
+              surges={surges}
+            />
+          </div>
+          {config.preset === "unusualVolume" && (
+            <p className="text-xs text-gray-500">{FINDER_CONFIG.volume.caveat}</p>
+          )}
+          {treatment.dim && <p className="text-xs text-red-300/80">{FINDER_CONFIG.events.dimNote}</p>}
           <p className="text-xs text-gray-500">{FINDER_CONFIG.provenanceNote}</p>
 
           <LargeDeals
