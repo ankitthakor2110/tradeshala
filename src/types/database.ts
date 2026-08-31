@@ -154,6 +154,23 @@ export interface LiveOptionQuote {
   updated_at: string;
 }
 
+// Durable snapshot of NSE bulk/block/short deals (see migration 20260813). Written
+// by the standalone scripts/nse-largedeals.mjs service-role writer; read by the
+// large-deals route. Shared market data — no user_id.
+export interface LargeDealRow {
+  id: number;
+  deal_type: "bulk" | "block" | "short";
+  symbol: string;
+  name: string;
+  client_name: string;
+  side: "BUY" | "SELL" | null;
+  qty: number;
+  watp: number | null;
+  deal_date: string;
+  as_on: string | null;
+  fetched_at: string;
+}
+
 export interface BrokerConnectionStatus {
   isConnected: boolean;
   brokerName: string | null;
@@ -259,6 +276,10 @@ export interface Position {
   // Server-side trailing-stop ratchet (peak for long, trough for short).
   trail_peak: number | null;
   targets: { price: number; qty: number }[] | null;
+  // Breakeven: raise stop to average_price + be_offset once profit reaches
+  // be_activation premium-points. Nullable → no breakeven.
+  be_activation: number | null;
+  be_offset: number | null;
   opened_at: string;
   closed_at: string | null;
   updated_at: string;
@@ -410,6 +431,11 @@ export interface Database {
         Row: LiveQuote;
         Insert: Omit<LiveQuote, "updated_at"> & { updated_at?: string };
         Update: Partial<LiveQuote>;
+      };
+      large_deals: {
+        Row: LargeDealRow;
+        Insert: Omit<LargeDealRow, "id" | "fetched_at"> & { fetched_at?: string };
+        Update: Partial<Omit<LargeDealRow, "id">>;
       };
     };
   };

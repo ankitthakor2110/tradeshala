@@ -26,20 +26,38 @@ export interface InstrumentRecord {
 }
 
 interface RawInstrument {
+  segment?: string;
   instrument_type?: string;
   trading_symbol?: string;
   name?: string;
   instrument_key?: string;
+  underlying_symbol?: string;
+  asset_symbol?: string;
+  lot_size?: number;
+  expiry?: number;
 }
 
 interface InstrumentCache {
   loadedAt: number;
   records: InstrumentRecord[];
   eqKeyBySymbol: Map<string, string>;
+  // underlying symbol (e.g. "NIFTY", "RELIANCE") → F&O lot size.
+  lotSizeBySymbol: Map<string, number>;
 }
 
 let cache: InstrumentCache | null = null;
 let inflight: Promise<InstrumentCache> | null = null;
+
+// Prefer the nearest expiry that is still in the future: a future expiry always
+// beats a past one, and among futures the closer date wins. Lot sizes can differ
+// across expiries during an exchange revision, so we key on the contract a user
+// would actually trade next.
+function preferExpiry(cand: number, cur: number, now: number): boolean {
+  const candFuture = cand >= now;
+  const curFuture = cur >= now;
+  if (candFuture !== curFuture) return candFuture;
+  return candFuture ? cand < cur : cand > cur;
+}
 
 async function build(): Promise<InstrumentCache> {
   const res = await fetch(NSE_URL);
@@ -50,25 +68,43 @@ async function build(): Promise<InstrumentCache> {
 
   const records: InstrumentRecord[] = [];
   const eqKeyBySymbol = new Map<string, string>();
+  const lotByUnderlying = new Map<string, { lot: number; expiry: number }>();
+  const now = Date.now();
 
   for (const r of all) {
-    if (r.instrument_type !== "EQ" && r.instrument_type !== "INDEX") continue;
-    if (!r.trading_symbol || !r.instrument_key) continue;
+    if (r.instrument_type === "EQ" || r.instrument_type === "INDEX") {
+      if (!r.trading_symbol || !r.instrument_key) continue;
+      records.push({
+        symbol: r.trading_symbol,
+        company_name: r.name ?? r.trading_symbol,
+        exchange: "NSE",
+        instrument_type: r.instrument_type,
+        instrument_key: r.instrument_key,
+      });
+      if (r.instrument_type === "EQ") {
+        eqKeyBySymbol.set(r.trading_symbol.toUpperCase(), r.instrument_key);
+      }
+      continue;
+    }
 
-    records.push({
-      symbol: r.trading_symbol,
-      company_name: r.name ?? r.trading_symbol,
-      exchange: "NSE",
-      instrument_type: r.instrument_type,
-      instrument_key: r.instrument_key,
-    });
-
-    if (r.instrument_type === "EQ") {
-      eqKeyBySymbol.set(r.trading_symbol.toUpperCase(), r.instrument_key);
+    // NSE F&O option rows carry the authoritative tradable lot size per underlying
+    // (index and stock alike) — the exchange truth the static config only mirrors.
+    if ((r.instrument_type === "CE" || r.instrument_type === "PE") && r.segment === "NSE_FO") {
+      const underlying = (r.underlying_symbol ?? r.asset_symbol ?? "").toUpperCase();
+      const lot = r.lot_size ?? 0;
+      const expiry = r.expiry ?? 0;
+      if (!underlying || lot <= 0) continue;
+      const cur = lotByUnderlying.get(underlying);
+      if (!cur || preferExpiry(expiry, cur.expiry, now)) {
+        lotByUnderlying.set(underlying, { lot, expiry });
+      }
     }
   }
 
-  return { loadedAt: Date.now(), records, eqKeyBySymbol };
+  const lotSizeBySymbol = new Map<string, number>();
+  for (const [sym, { lot }] of lotByUnderlying) lotSizeBySymbol.set(sym, lot);
+
+  return { loadedAt: Date.now(), records, eqKeyBySymbol, lotSizeBySymbol };
 }
 
 async function getCache(): Promise<InstrumentCache> {
@@ -109,6 +145,20 @@ export async function searchInstruments(query: string): Promise<InstrumentRecord
   }
 
   return [...starts, ...contains].slice(0, 10);
+}
+
+/**
+ * Authoritative F&O lot size for an underlying (index or stock), from the Upstox
+ * instrument master. Returns null for non-F&O symbols or when the master is
+ * unreachable — callers fall back to the static config, then 1.
+ */
+export async function resolveLotSize(symbol: string): Promise<number | null> {
+  try {
+    const c = await getCache();
+    return c.lotSizeBySymbol.get(symbol.trim().toUpperCase()) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve an NSE equity trading symbol to its ISIN-based Upstox instrument key. */

@@ -113,7 +113,7 @@ export const TRADE_CONFIG = {
     { symbol: "INFY", name: "Infosys", exchange: "NSE" },
     { symbol: "ICICIBANK", name: "ICICI Bank", exchange: "NSE" },
     { symbol: "WIPRO", name: "Wipro", exchange: "NSE" },
-    { symbol: "TATAMOTORS", name: "Tata Motors", exchange: "NSE" },
+    { symbol: "TMPV", name: "Tata Motors PV", exchange: "NSE" },
     { symbol: "BAJFINANCE", name: "Bajaj Finance", exchange: "NSE" },
   ],
 

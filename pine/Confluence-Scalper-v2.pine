@@ -1,0 +1,954 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Module ① from "Zero Lag Trend Signals (MTF)" © AlgoAlpha (MPL-2.0)
+// Module ④ from "Zero Lag MACD Enhanced v1.2" — orig. Glaz, ideas @yassotreyo, tweaked by Albert Callisto
+
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+//  CONFLUENCE SCALPER  ·  CE / PE  ·  more triggers, same strictness
+//
+//  ① Zero Lag Trend   ② Fast EMA + ③ Slow EMA   ④ Zero Lag MACD
+//
+//  READ THE "Ambiguous SL+TP" ROW FIRST. If it is a large share of total trades,
+//  the bracket is narrower than one bar's range and the P&L is an artefact of the
+//  same-bar assumption, not of the signal. Widen the bracket before tuning entries.
+//
+//  THIS IS AN INDICATOR. It marks and alerts; it does not place or close orders.
+//
+//  ── WEBHOOK JSON FIX (2026-08-14) ────────────────────────────────────────────
+//  f_entryJson previously emitted delta via str.tostring(optDelta, "#.00").
+//  In Pine's format spec '#' is an OPTIONAL digit, so a value < 1 (delta 0.60)
+//  rendered as ".60" — INVALID JSON. TradingView downgraded such alerts to
+//  text/plain and the ledger rejected them ("Body is not valid JSON"), so no
+//  ENTRY ever opened (no engine order, no Telegram). Fixed by using "0.00"
+//  ('0' forces the integer digit) -> "0.60". Same fix applied to index_points
+//  in f_exitJson ("#.##" -> "0.##") so a sub-1 point value can't reproduce it.
+// ═══════════════════════════════════════════════════════════════════════════════
+indicator("Confluence Scalper CE/PE [v2]", shorttitle = "CONFLUENCE SCALP v2",
+     overlay = true, max_labels_count = 500)
+
+f_startBar(bool cond) =>
+    var int sb = na
+    if cond
+        sb := na(sb) ? bar_index : sb
+    else
+        sb := na
+    sb
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ① ZERO LAG TREND
+// ═══════════════════════════════════════════════════════════════════════════════
+g1     = "① Zero Lag Trend"
+m1On   = input.bool (true, "Include in confluence", group = g1)
+m1Need = input.string("Fresh signal only", "Confirm on", options = ["State or signal", "Fresh signal only"], group = g1)
+m1Sig  = input.string("Flip or entry cross", "Fresh signal type",
+     options = ["Trend flip", "Entry cross", "Flip or entry cross"], group = g1,
+     tooltip = "'Flip or entry cross' counts BOTH the ▲▼ trend flips and the small pullback entries as valid fresh signals. Roughly doubles this leg's trigger opportunities without weakening the direction requirement — this is the honest way to get more trades.")
+m1Mem  = input.int  (20,  "Signal memory (bars)", minval = 1, group = g1,
+     tooltip = "How long a fired signal stays 'fresh'. Was 12; 20 gives the other legs more time to arrive.")
+length = input.int  (70,  "Length", group = g1)
+mult   = input.float(1.2, "Band Multiplier", group = g1)
+
+gTF = "① Extra Timeframes"
+t1 = input.timeframe("5",   "Time frame 1", group = gTF)
+t2 = input.timeframe("15",  "Time frame 2", group = gTF)
+t3 = input.timeframe("60",  "Time frame 3", group = gTF)
+t4 = input.timeframe("240", "Time frame 4", group = gTF)
+t5 = input.timeframe("1D",  "Time frame 5", group = gTF)
+
+src = close
+int   lag        = int(math.floor((length - 1) / 2))
+float zlema      = ta.ema(src + (src - src[lag]), length)
+float volatility = ta.highest(ta.atr(length), length * 3) * mult
+
+var int trend = 0
+if ta.crossover(close, zlema + volatility)
+    trend := 1
+if ta.crossunder(close, zlema - volatility)
+    trend := -1
+
+bool zlBullEntry = ta.crossover(close, zlema)  and trend ==  1 and trend[1] ==  1
+bool zlBearEntry = ta.crossunder(close, zlema) and trend == -1 and trend[1] == -1
+bool zlBullFlip  = ta.crossover(trend, 0)
+bool zlBearFlip  = ta.crossunder(trend, 0)
+
+bool zlUpEvt = m1Sig == "Trend flip" ? zlBullFlip : m1Sig == "Entry cross" ? zlBullEntry : (zlBullFlip or zlBullEntry)
+bool zlDnEvt = m1Sig == "Trend flip" ? zlBearFlip : m1Sig == "Entry cross" ? zlBearEntry : (zlBearFlip or zlBearEntry)
+
+float zlUpAgo   = ta.barssince(zlUpEvt)
+float zlDnAgo   = ta.barssince(zlDnEvt)
+bool zlFreshUp = not na(zlUpAgo) and zlUpAgo <= m1Mem
+bool zlFreshDn = not na(zlDnAgo) and zlDnAgo <= m1Mem
+
+bool m1CE  = m1Need == "State or signal" ? trend ==  1 : (trend ==  1 and zlFreshUp)
+bool m1PE  = m1Need == "State or signal" ? trend == -1 : (trend == -1 and zlFreshDn)
+int  m1Dir = trend
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ② FAST EMA   /   ③ SLOW EMA
+// ═══════════════════════════════════════════════════════════════════════════════
+g2 = "② Fast EMA"
+m2On  = input.bool  (true,  "Enable", group = g2)
+m2Src = input.source(close, "Source", group = g2)
+m2Len = input.int   (5,     "Length", minval = 1, group = g2)
+m2Need = input.string("State or signal", "Confirm on", options = ["State or signal", "Fresh signal only"], group = g2,
+     tooltip = "Defaults to 'State or signal' because your spec is 'touch or crosses OR ALREADY crossed' — an EMA that crossed long ago and stayed crossed must still confirm. This input governs CONFIRMATION only; the leg's contribution to the span gate is handled separately and is always capped by the memory below.")
+m2Mem  = input.int   (20, "Signal memory (bars)", minval = 1, group = g2,
+     tooltip = "Two jobs: (1) if 'Fresh signal only' is selected, the cross must be within this window to confirm; (2) regardless of the setting, the EMA cross only counts toward the span gate while it is inside this window. Older than this and the leg drops out of the timing question but still confirms on state.")
+
+g3 = "③ Slow EMA"
+m3On  = input.bool  (true,  "Enable", group = g3)
+m3Src = input.source(close, "Source", group = g3)
+m3Len = input.int   (10,    "Length", minval = 1, group = g3)
+
+gX = "②③ EMA Confluence"
+kissMode  = input.string("EMA slope direction", "A touch satisfies",
+     options = ["Either side", "EMA slope direction", "Off"], group = gX)
+emaTolMd  = input.string("Points", "Touch tolerance basis", options = ["ATR", "Percent", "Points"], group = gX)
+emaTolAtr = input.float (0.15, "Tolerance · ATR mult", minval = 0, step = 0.05, group = gX)
+emaTolPct = input.float (0.05, "Tolerance · % of price", minval = 0, step = 0.01, group = gX)
+emaTolPts = input.float (3.0,  "Tolerance · index points", minval = 0, step = 0.5, group = gX,
+     tooltip = "Widened from 2.0 to 3.0: with slope-direction crediting, a wider touch window adds valid setups without letting the leg confirm both sides.")
+
+float fastEma = ta.ema(m2Src, m2Len)
+float slowEma = ta.ema(m3Src, m3Len)
+float atr14   = ta.atr(14)
+
+bool  emaBothOn  = m2On and m3On
+bool  emaActive  = m2On or m3On
+float emaSolo    = m2On ? fastEma : slowEma
+float emaSoloSrc = m2On ? m2Src   : m3Src
+
+float emaDiff  = emaBothOn ? fastEma - slowEma : emaSoloSrc - emaSolo
+float emaTol   = emaTolMd == "ATR" ? atr14 * emaTolAtr : emaTolMd == "Percent" ? close * emaTolPct / 100 : emaTolPts
+bool  kissRaw  = kissMode != "Off" and math.abs(emaDiff) <= emaTol
+bool  fastUp   = fastEma > fastEma[1]
+bool  kissCE   = kissRaw and (kissMode == "Either side" or fastUp)
+bool  kissPE   = kissRaw and (kissMode == "Either side" or not fastUp)
+
+bool emaUpEvt = emaBothOn ? ta.crossover(fastEma, slowEma)  : ta.crossover(emaSoloSrc, emaSolo)
+bool emaDnEvt = emaBothOn ? ta.crossunder(fastEma, slowEma) : ta.crossunder(emaSoloSrc, emaSolo)
+
+// one ta.barssince per event, stored once and referenced everywhere below
+float emaUpAgo   = ta.barssince(emaUpEvt)
+float emaDnAgo   = ta.barssince(emaDnEvt)
+bool  emaFreshUp = not na(emaUpAgo) and emaUpAgo <= m2Mem
+bool  emaFreshDn = not na(emaDnAgo) and emaDnAgo <= m2Mem
+
+bool m2CE  = emaActive and (emaDiff > 0 or kissCE) and (m2Need == "State or signal" or emaFreshUp)
+bool m2PE  = emaActive and (emaDiff < 0 or kissPE) and (m2Need == "State or signal" or emaFreshDn)
+int  m2Dir = not emaActive ? 0 : kissRaw ? 0 : emaDiff > 0 ? 1 : emaDiff < 0 ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ④ ZERO LAG MACD ENHANCED
+// ═══════════════════════════════════════════════════════════════════════════════
+g4 = "④ Zero Lag MACD"
+m4On          = input.bool  (true,  "Include in confluence", group = g4)
+m4Ref         = input.string("MACD vs Signal", "Cross reference",
+     options = ["MACD vs Signal", "MACD vs Zero", "MACD vs MACD-EMA"], group = g4)
+m4Need        = input.string("Fresh signal only", "Confirm on", options = ["State or signal", "Fresh signal only"], group = g4)
+m4AnyCross    = input.bool  (true,  "Any MACD cross counts as fresh", group = g4,
+     tooltip = "Credits a signal-line cross OR a zero-line cross as the fresh event, instead of only the chosen reference. More valid triggers, same direction requirement.")
+m4Mem         = input.int   (20,    "Signal memory (bars)", minval = 1, group = g4)
+m4Touch       = input.bool  (false, "Count a near-cross as satisfied", group = g4)
+m4Tol         = input.float (0.10,  "Near-cross tolerance · ATR mult", minval = 0, step = 0.05, group = g4)
+m4Src         = input.source(close, "Source", group = g4)
+fastLength    = input.int   (12,    "Fast MM period",   minval = 1, group = g4)
+slowLength    = input.int   (26,    "Slow MM period",   minval = 1, group = g4)
+signalLength  = input.int   (9,     "Signal MM period", minval = 1, group = g4)
+MacdEmaLength = input.int   (9,     "MACD EMA period",  minval = 1, group = g4)
+useEma        = input.bool  (true,  "Use EMA (otherwise SMA)", group = g4)
+useOldAlgo    = input.bool  (false, "Use Glaz algo (otherwise 'real' original zero lag)", group = g4)
+showDots      = input.bool  (false, "Show symbols to indicate crossing", group = g4)
+dotsDistance  = input.float (1.5,   "Symbols distance factor", minval = 0.1, group = g4)
+
+float ma1        = useEma ? ta.ema(m4Src, fastLength) : ta.sma(m4Src, fastLength)
+float ma2        = useEma ? ta.ema(ma1,   fastLength) : ta.sma(ma1,   fastLength)
+float zerolagEMA = 2 * ma1 - ma2
+
+float mas1          = useEma ? ta.ema(m4Src, slowLength) : ta.sma(m4Src, slowLength)
+float mas2          = useEma ? ta.ema(mas1,  slowLength) : ta.sma(mas1,  slowLength)
+float zerolagslowMA = 2 * mas1 - mas2
+
+float ZeroLagMACD = zerolagEMA - zerolagslowMA
+float emasig1     = ta.ema(ZeroLagMACD, signalLength)
+float emasig2     = ta.ema(emasig1, signalLength)
+float macdSignal  = useOldAlgo ? ta.sma(ZeroLagMACD, signalLength) : 2 * emasig1 - emasig2
+float macdEma     = ta.ema(ZeroLagMACD, MacdEmaLength)
+
+float m4RefLine = m4Ref == "MACD vs Signal" ? macdSignal : m4Ref == "MACD vs Zero" ? 0.0 : macdEma
+float m4Diff    = ZeroLagMACD - m4RefLine
+
+bool macdUpEvt = ta.crossover(ZeroLagMACD, macdSignal)
+bool macdDnEvt = ta.crossunder(ZeroLagMACD, macdSignal)
+bool zeroUpEvt = ta.crossover(ZeroLagMACD, 0)
+bool zeroDnEvt = ta.crossunder(ZeroLagMACD, 0)
+bool refUpEvt  = ta.crossover(m4Diff, 0)
+bool refDnEvt  = ta.crossunder(m4Diff, 0)
+
+bool m4UpEvt = m4AnyCross ? (refUpEvt or macdUpEvt or zeroUpEvt) : refUpEvt
+bool m4DnEvt = m4AnyCross ? (refDnEvt or macdDnEvt or zeroDnEvt) : refDnEvt
+
+float m4UpAgo   = ta.barssince(m4UpEvt)
+float m4DnAgo   = ta.barssince(m4DnEvt)
+bool m4FreshUp = not na(m4UpAgo) and m4UpAgo <= m4Mem
+bool m4FreshDn = not na(m4DnAgo) and m4DnAgo <= m4Mem
+bool m4Kiss    = m4Touch and math.abs(m4Diff) <= atr14 * m4Tol
+
+bool m4CE  = m4Need == "State or signal" ? (m4Diff > 0 or m4Kiss) : ((m4Diff > 0 or m4Kiss) and m4FreshUp)
+bool m4PE  = m4Need == "State or signal" ? (m4Diff < 0 or m4Kiss) : ((m4Diff < 0 or m4Kiss) and m4FreshDn)
+int  m4Dir = m4Kiss ? 0 : m4Diff > 0 ? 1 : m4Diff < 0 ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑤ HTF CONFIRMATION
+// ═══════════════════════════════════════════════════════════════════════════════
+gM = "⑤ HTF Confirmation"
+useMTF = input.bool(false, "Require HTF agreement", group = gM)
+minTF  = input.int (3, "Min agreeing timeframes", minval = 1, maxval = 5, group = gM)
+cT1    = input.bool(true, "Count TF 1", inline = "c1", group = gM)
+cT2    = input.bool(true, "Count TF 2", inline = "c1", group = gM)
+cT3    = input.bool(true, "Count TF 3", inline = "c2", group = gM)
+cT4    = input.bool(true, "Count TF 4", inline = "c2", group = gM)
+cT5    = input.bool(true, "Count TF 5", inline = "c3", group = gM)
+
+int s1 = request.security(syminfo.tickerid, t1, trend)
+int s2 = request.security(syminfo.tickerid, t2, trend)
+int s3 = request.security(syminfo.tickerid, t3, trend)
+int s4 = request.security(syminfo.tickerid, t4, trend)
+int s5 = request.security(syminfo.tickerid, t5, trend)
+
+int mtfBull = (cT1 and s1 ==  1 ? 1 : 0) + (cT2 and s2 ==  1 ? 1 : 0) + (cT3 and s3 ==  1 ? 1 : 0)
+     + (cT4 and s4 ==  1 ? 1 : 0) + (cT5 and s5 ==  1 ? 1 : 0)
+int mtfBear = (cT1 and s1 == -1 ? 1 : 0) + (cT2 and s2 == -1 ? 1 : 0) + (cT3 and s3 == -1 ? 1 : 0)
+     + (cT4 and s4 == -1 ? 1 : 0) + (cT5 and s5 == -1 ? 1 : 0)
+
+bool mtfCEok = not useMTF or mtfBull >= minTF
+bool mtfPEok = not useMTF or mtfBear >= minTF
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑥ CONFLUENCE ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+gC = "⑥ Confluence"
+minConf  = input.int   (3, "Confirmations required", minval = 1, maxval = 3, group = gC,
+     tooltip = "Dropping this to 2 is the single largest increase in trade count available. It also abandons your 3-leg concept, so test it as a separate run rather than leaving it there by default.")
+useVeto  = input.bool  (true,  "Opposite reading vetoes the setup", group = gC)
+useSpan  = input.bool  (true,  "Limit span between first and last confirmation", group = gC)
+spanFrom = input.string("Joint gap between signals", "Measure span as",
+     options = ["Joint gap between signals", "Age of first leg armed"], group = gC,
+     tooltip = "Joint gap = bars between the OLDEST and NEWEST qualifying cross/flip among the legs. This is the coherence measure: it asks whether the three signals arrived near each other, and it binds independently of each leg's own memory window. Age of first leg armed = the older behaviour, bars since the first leg entered agreement.")
+maxSpan  = input.int   (10, "Max span (bars)", minval = 0, group = gC,
+     tooltip = "Ceiling on the joint gap. With all three memories at 20, the largest achievable gap is 20 (one leg at 20 bars, another at 0), so any value at or above 20 makes this gate inert — the Span row will read 'inert' when that happens. 10 bars is 30 minutes on a 3m chart.")
+
+int activeN = (m1On ? 1 : 0) + (emaActive ? 1 : 0) + (m4On ? 1 : 0)
+int needN   = math.min(minConf, math.max(activeN, 1))
+
+int ceCount = (m1On and m1CE ? 1 : 0) + (emaActive and m2CE ? 1 : 0) + (m4On and m4CE ? 1 : 0)
+int peCount = (m1On and m1PE ? 1 : 0) + (emaActive and m2PE ? 1 : 0) + (m4On and m4PE ? 1 : 0)
+
+int ceVeto = (m1On and m1Dir == -1 ? 1 : 0) + (emaActive and m2Dir == -1 ? 1 : 0) + (m4On and m4Dir == -1 ? 1 : 0)
+int peVeto = (m1On and m1Dir ==  1 ? 1 : 0) + (emaActive and m2Dir ==  1 ? 1 : 0) + (m4On and m4Dir ==  1 ? 1 : 0)
+
+bool alignCE = activeN > 0 and ceCount >= needN and (not useVeto or ceVeto == 0)
+bool alignPE = activeN > 0 and peCount >= needN and (not useVeto or peVeto == 0)
+
+int ceArm1 = f_startBar(m1On and m1CE)
+int ceArm2 = f_startBar(emaActive and m2CE)
+int ceArm3 = f_startBar(m4On and m4CE)
+int peArm1 = f_startBar(m1On and m1PE)
+int peArm2 = f_startBar(emaActive and m2PE)
+int peArm3 = f_startBar(m4On and m4PE)
+
+// ── qualifying cross ages for the span ──────────────────────────────────────
+// Every leg contributes the SAME kind of quantity: the age of its own cross or
+// flip event, and only while that event is still inside the leg's memory window.
+// A leg whose cross is older than its memory contributes na — it drops out of
+// the timing question but still confirms on state. That is what keeps a
+// long-correct leg (e.g. EMAs crossed 200 bars ago and still crossed) from ever
+// blocking a setup, while bounding the largest achievable gap at max(memory).
+// All values reuse the barssince results stored once at each leg above.
+float ceEvt1 = m1On      and zlFreshUp  ? zlUpAgo  : na
+float ceEvt2 = emaActive and emaFreshUp ? emaUpAgo : na
+float ceEvt3 = m4On      and m4FreshUp  ? m4UpAgo  : na
+float peEvt1 = m1On      and zlFreshDn  ? zlDnAgo  : na
+float peEvt2 = emaActive and emaFreshDn ? emaDnAgo : na
+float peEvt3 = m4On      and m4FreshDn  ? m4DnAgo  : na
+
+f_minNz(float a, float b, float c) =>
+    float r = na
+    if not na(a)
+        r := na(r) ? a : math.min(r, a)
+    if not na(b)
+        r := na(r) ? b : math.min(r, b)
+    if not na(c)
+        r := na(r) ? c : math.min(r, c)
+    r
+
+f_maxNz(float a, float b, float c) =>
+    float r = na
+    if not na(a)
+        r := na(r) ? a : math.max(r, a)
+    if not na(b)
+        r := na(r) ? b : math.max(r, b)
+    if not na(c)
+        r := na(r) ? c : math.max(r, c)
+    r
+
+float ceArmFirst = f_minNz(ceArm1, ceArm2, ceArm3)
+float peArmFirst = f_minNz(peArm1, peArm2, peArm3)
+
+// joint gap = oldest qualifying cross age minus newest. One contributing leg
+// yields 0 (nothing to be incoherent with). No contributing legs yields na.
+float ceOldest = f_maxNz(ceEvt1, ceEvt2, ceEvt3)
+float ceNewest = f_minNz(ceEvt1, ceEvt2, ceEvt3)
+float peOldest = f_maxNz(peEvt1, peEvt2, peEvt3)
+float peNewest = f_minNz(peEvt1, peEvt2, peEvt3)
+
+float ceGap = na(ceOldest) or na(ceNewest) ? na : ceOldest - ceNewest
+float peGap = na(peOldest) or na(peNewest) ? na : peOldest - peNewest
+
+float ceSpan = spanFrom == "Age of first leg armed" ? (na(ceArmFirst) ? na : bar_index - ceArmFirst) : ceGap
+float peSpan = spanFrom == "Age of first leg armed" ? (na(peArmFirst) ? na : bar_index - peArmFirst) : peGap
+
+// na span means "no timing data" and must PASS, not block — otherwise a leg
+// configured on state with a stale cross would silently kill every setup.
+bool ceSpanOk = not useSpan or na(ceSpan) or ceSpan <= maxSpan
+bool peSpanOk = not useSpan or na(peSpan) or peSpan <= maxSpan
+
+// the gate cannot bind once maxSpan reaches the largest memory window, since no
+// gap can exceed it. Surfaced in the table so a dead gate is never silent.
+int  spanCeil  = math.max(m1On ? m1Mem : 0, math.max(emaActive ? m2Mem : 0, m4On ? m4Mem : 0))
+bool spanInert = not useSpan or spanFrom != "Joint gap between signals" or maxSpan >= spanCeil
+
+bool ceComplete = alignCE and not alignCE[1] and ceSpanOk
+bool peComplete = alignPE and not alignPE[1] and peSpanOk
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑪ NOISE FILTERS
+// ═══════════════════════════════════════════════════════════════════════════════
+gF = "⑪ Noise Filters"
+cooldown  = input.int  (3,  "Cooldown after any entry (bars)", minval = 0, group = gF,
+     tooltip = "Was 8. With avg holds under 2 bars, 8 was silently blocking most of the day.")
+resetBars = input.int  (2,  "Same-side re-arm dwell (bars)", minval = 0, group = gF)
+useSep    = input.bool (true, "Require EMA separation at entry", group = gF)
+minSepPts = input.float(1.0, "Min |fast − slow| at entry (points)", minval = 0, step = 0.5, group = gF)
+useAdx    = input.bool (true, "Require trend strength (ADX)", group = gF)
+adxLen    = input.int  (14, "ADX / DI length", minval = 1, group = gF)
+adxSm     = input.int  (14, "ADX smoothing",   minval = 1, group = gF)
+adxMin    = input.float(14, "Min ADX", minval = 0, step = 1, group = gF)
+useRngF   = input.bool (true, "Require minimum recent range", group = gF)
+rngLen    = input.int  (20, "Range lookback (bars)", minval = 2, group = gF)
+minRngPts = input.float(25, "Min high−low over lookback (points)", minval = 0, step = 5, group = gF,
+     tooltip = "Was 35. Keep this ABOVE your stop+target combined, or you are trading brackets wider than the market's recent travel.")
+useBand   = input.bool (false, "Require close outside the Zero Lag band", group = gF)
+
+[diP, diM, adxVal] = ta.dmi(adxLen, adxSm)
+
+var int ceOffRun = 0
+var int peOffRun = 0
+ceOffRun := alignCE ? 0 : ceOffRun + 1
+peOffRun := alignPE ? 0 : peOffRun + 1
+bool ceDwellOk = resetBars == 0 or nz(ceOffRun[1], 999) >= resetBars
+bool peDwellOk = resetBars == 0 or nz(peOffRun[1], 999) >= resetBars
+
+bool sepOk    = not useSep  or math.abs(emaDiff) >= minSepPts
+bool adxOk    = not useAdx  or adxVal >= adxMin
+float rng20   = ta.highest(high, rngLen) - ta.lowest(low, rngLen)
+bool rngOk    = not useRngF or rng20 >= minRngPts
+bool bandCEok = not useBand or close > zlema + volatility
+bool bandPEok = not useBand or close < zlema - volatility
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑦ SCALP EXITS
+// ═══════════════════════════════════════════════════════════════════════════════
+gT = "⑦ Scalp Exits"
+dirMode  = input.string("Both", "Take", options = ["Both", "CE only", "PE only"], group = gT)
+riskMode = input.string("Points", "SL / TP basis", options = ["Points", "ATR", "Percent"], group = gT)
+slPts    = input.float(10.0, "Stop loss · NIFTY points",   minval = 0.5, step = 0.5, group = gT)
+tpPts    = input.float(10.0, "Take profit · NIFTY points", minval = 0.5, step = 0.5, group = gT,
+     tooltip = "At the 43.9% win rate you measured, 10/10 loses and 10/20 wins. Try 20 here before tuning anything in the entry logic — it is the highest-leverage single change in this script.")
+atrLen   = input.int  (14,  "ATR length",    minval = 1, group = gT)
+slMult   = input.float(1.5, "SL · ATR mult", minval = 0.1, step = 0.1, group = gT)
+tpMult   = input.float(3.0, "TP · ATR mult", minval = 0.1, step = 0.1, group = gT)
+slPct    = input.float(1.0, "SL · %",        minval = 0.01, step = 0.1, group = gT)
+tpPct    = input.float(2.0, "TP · %",        minval = 0.01, step = 0.1, group = gT)
+sameBar  = input.string("Stop first", "If SL and TP both hit in one bar",
+     options = ["Stop first", "Target first"], group = gT)
+flipExit = input.bool (false, "Also exit on opposite completion", group = gT)
+flatExit = input.bool (false, "Also exit when confluence breaks", group = gT)
+maxBars  = input.int  (10, "Time stop · max bars in trade (0 = off)", minval = 0, group = gT)
+
+gS = "⑦ Session"
+useSess  = input.bool   (true, "Restrict to intraday session", group = gS)
+entryWin = input.session("0920-1500", "Entry window", group = gS)
+holdWin  = input.session("0915-1520", "Hold window (square off after this)", group = gS)
+
+bool inEntryWin   = not na(time(timeframe.period, entryWin))
+bool inHoldWin    = not na(time(timeframe.period, holdWin))
+bool sessEntryOk  = not useSess or inEntryWin
+bool sessForceOut = useSess and not inHoldWin
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑧ POSITION & P&L
+// ═══════════════════════════════════════════════════════════════════════════════
+gB = "⑧ Position & P&L"
+instMode = input.string("Options (delta)", "Instrument", options = ["Options (delta)", "Index / futures"], group = gB)
+lots     = input.int   (4,    "Lots", minval = 1, group = gB)
+lotSize  = input.int   (65,   "Lot size", minval = 1, group = gB)
+optDelta = input.float (0.60, "Option delta", minval = 0.05, maxval = 1.0, step = 0.05, group = gB)
+chgPerLot= input.float (30.0, "Charges per lot, round trip (₹)", minval = 0, step = 5, group = gB)
+capital  = input.float (100000, "Starting capital (₹)", minval = 1, group = gB)
+idxSize  = input.float (1.0,  "Index mode: units per trade", minval = 0.01, group = gB)
+useRng   = input.bool  (false, "Limit date range", group = gB)
+fromDt   = input.time  (timestamp("01 Jan 2020 00:00 +0000"), "From", group = gB)
+toDt     = input.time  (timestamp("01 Jan 2035 00:00 +0000"), "To",   group = gB)
+confirm  = input.bool  (true,  "Confirmed bars only (no repaint)", group = gB)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑫ DAILY LIMITS
+// ═══════════════════════════════════════════════════════════════════════════════
+gL = "⑫ Daily Limits"
+maxTrDay  = input.int  (8, "Max trades per day (0 = off)", minval = 0, group = gL,
+     tooltip = "Was 4. Given your 82 trades and 'Today: 0', this cap was very likely the biggest single reason setups went untaken.")
+maxLossDay= input.int  (3, "Stop after N losing trades (0 = off)", minval = 0, group = gL)
+dayLossRs = input.float(5000, "Daily loss cap ₹ (0 = off)", minval = 0, step = 500, group = gL)
+dayGainRs = input.float(0,    "Daily profit target ₹ (0 = off)", minval = 0, step = 500, group = gL)
+
+float units      = lots * lotSize
+float tripCharge = lots * chgPerLot
+
+bool inRng = not useRng or (time >= fromDt and time <= toDt)
+bool ready = inRng and (not confirm or barstate.isconfirmed)
+
+bool newDay = na(time[1]) or dayofmonth != dayofmonth[1]
+var int   trDay   = 0
+var int   lossDay = 0
+var float pnlDay  = 0.0
+if newDay
+    trDay   := 0
+    lossDay := 0
+    pnlDay  := 0.0
+
+bool dayOk = (maxTrDay == 0 or trDay < maxTrDay) and (maxLossDay == 0 or lossDay < maxLossDay)
+     and (dayLossRs == 0 or pnlDay > -dayLossRs) and (dayGainRs == 0 or pnlDay < dayGainRs)
+
+var int lastEntryBar = na
+bool coolOk = cooldown == 0 or na(lastEntryBar) or (bar_index - lastEntryBar) >= cooldown
+
+bool dirCEok = dirMode != "PE only"
+bool dirPEok = dirMode != "CE only"
+
+bool filtCE = sepOk and adxOk and rngOk and bandCEok and ceDwellOk
+bool filtPE = sepOk and adxOk and rngOk and bandPEok and peDwellOk
+
+bool trigCE = ceComplete and dirCEok and mtfCEok and coolOk and sessEntryOk and dayOk and filtCE
+bool trigPE = peComplete and dirPEok and mtfPEok and coolOk and sessEntryOk and dayOk and filtPE
+
+float atrVal = ta.atr(atrLen)
+
+var int   pos        = 0
+var float entryPrice = na
+var float stopPrice  = na
+var float takePrice  = na
+var float slDist     = na
+
+var float equity   = capital
+var float peakEq   = capital
+var float maxDDpct = 0.0
+var float maxDDabs = 0.0
+var int   nWin     = 0
+var int   nLoss    = 0
+var float grossWin = 0.0
+var float grossLos = 0.0
+var float bigWin   = 0.0
+var float bigLoss  = 0.0
+var int   runLoss  = 0
+var int   maxRunL  = 0
+var int   runWin   = 0
+var int   maxRunW  = 0
+var int   held     = 0
+var int   totHeld  = 0
+var int   nSL      = 0
+var int   nTP      = 0
+var int   nSig     = 0
+var int   nTime    = 0
+var int   nSess    = 0
+var int   nAmbig   = 0
+var int   nBar1    = 0
+var int   nCE      = 0
+var int   nPE      = 0
+var float ceProfit = 0.0
+var float peProfit = 0.0
+var float totPts   = 0.0
+var float totChg   = 0.0
+var float totR     = 0.0
+
+// ---- exits ------------------------------------------------------------------
+float exitPrice = na
+bool  doExit    = false
+int   exitKind  = 0
+bool  ambig     = false
+
+if pos != 0
+    held += 1
+    bool hitSL = pos == 1 ? low  <= stopPrice : high >= stopPrice
+    bool hitTP = pos == 1 ? high >= takePrice : low  <= takePrice
+
+    if hitSL and hitTP
+        ambig     := true
+        exitPrice := sameBar == "Stop first" ? stopPrice : takePrice
+        doExit    := true
+        exitKind  := sameBar == "Stop first" ? 1 : 2
+    else if hitSL
+        exitPrice := stopPrice
+        doExit    := true
+        exitKind  := 1
+    else if hitTP
+        exitPrice := takePrice
+        doExit    := true
+        exitKind  := 2
+
+    if not doExit and maxBars > 0 and held >= maxBars
+        exitPrice := close
+        doExit    := true
+        exitKind  := 4
+
+    if not doExit and sessForceOut
+        exitPrice := close
+        doExit    := true
+        exitKind  := 5
+
+    if not doExit and ready
+        bool flip = flipExit and ((pos == 1 and peComplete) or (pos == -1 and ceComplete))
+        bool flat = flatExit and ((pos == 1 and not alignCE) or (pos == -1 and not alignPE))
+        if flip or flat
+            exitPrice := close
+            doExit    := true
+            exitKind  := 3
+
+string exitTag = exitKind == 1 ? "SL" : exitKind == 2 ? "TP" : exitKind == 3 ? "SIGNAL"
+     : exitKind == 4 ? "TIME" : exitKind == 5 ? "SESSION" : ""
+
+if doExit
+    float pts   = (exitPrice - entryPrice) * pos
+    float gross = instMode == "Options (delta)" ? pts * optDelta * units : pts * idxSize
+    float chg   = instMode == "Options (delta)" ? tripCharge : 0.0
+    float pnl   = gross - chg
+    equity  += pnl
+    pnlDay  += pnl
+    totPts  += pts
+    totChg  += chg
+    totR    += slDist > 0 ? pts / slDist : 0
+    totHeld += held
+    nAmbig  += ambig ? 1 : 0
+    nBar1   += held <= 1 ? 1 : 0
+    held    := 0
+    nSL     += exitKind == 1 ? 1 : 0
+    nTP     += exitKind == 2 ? 1 : 0
+    nSig    += exitKind == 3 ? 1 : 0
+    nTime   += exitKind == 4 ? 1 : 0
+    nSess   += exitKind == 5 ? 1 : 0
+    if pos == 1
+        ceProfit += pnl
+    else
+        peProfit += pnl
+    if pnl >= 0
+        nWin     += 1
+        grossWin += pnl
+        bigWin   := math.max(bigWin, pnl)
+        runWin   += 1
+        runLoss  := 0
+        maxRunW  := math.max(maxRunW, runWin)
+    else
+        nLoss    += 1
+        lossDay  += 1
+        grossLos += -pnl
+        bigLoss  := math.max(bigLoss, -pnl)
+        runLoss  += 1
+        runWin   := 0
+        maxRunL  := math.max(maxRunL, runLoss)
+    peakEq   := math.max(peakEq, equity)
+    float dd = peakEq - equity
+    maxDDabs := math.max(maxDDabs, dd)
+    maxDDpct := math.max(maxDDpct, peakEq > 0 ? dd / peakEq * 100 : 0)
+    pos := 0
+
+bool blockedByPos = (trigCE or trigPE) and pos != 0
+
+// ---- entries ----------------------------------------------------------------
+if pos == 0 and ready and (trigCE or trigPE)
+    pos          := trigCE ? 1 : -1
+    entryPrice   := close
+    float slD    = riskMode == "Points" ? slPts : riskMode == "ATR" ? atrVal * slMult : entryPrice * slPct / 100
+    float tpD    = riskMode == "Points" ? tpPts : riskMode == "ATR" ? atrVal * tpMult : entryPrice * tpPct / 100
+    slDist       := slD
+    stopPrice    := pos == 1 ? entryPrice - slD : entryPrice + slD
+    takePrice    := pos == 1 ? entryPrice + tpD : entryPrice - tpD
+    held         := 0
+    lastEntryBar := bar_index
+    trDay        += 1
+    nCE          += pos ==  1 ? 1 : 0
+    nPE          += pos == -1 ? 1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑨ APPEARANCE
+// ═══════════════════════════════════════════════════════════════════════════════
+gA = "⑨ Appearance"
+green   = input.color(#00ffbb, "CE (bullish) Color", group = gA)
+red     = input.color(#ff1100, "PE (bearish) Color", group = gA)
+showZL  = input.bool(true,  "Zero Lag basis + bands", group = gA)
+showFil = input.bool(true,  "Band fills",             group = gA)
+showZLs = input.bool(false, "Original ZL signals",    group = gA)
+showEma = input.bool(true,  "EMA lines",              group = gA)
+showCom = input.bool(true,  "CE / PE entry markers",  group = gA)
+showLvl = input.bool(true,  "SL / TP lines",          group = gA)
+showBg  = input.bool(false, "Confluence background",  group = gA)
+showNoTrade = input.bool(true, "Shade filtered-out (no-trade) bars", group = gA)
+posMTF  = input.string("Hide",         "HTF table",        options = ["Top right", "Top center", "Top left", "Middle right", "Middle left", "Bottom right", "Bottom center", "Bottom left", "Hide"], group = gA)
+posMOD  = input.string("Middle left",  "Confluence table", options = ["Top right", "Top center", "Top left", "Middle right", "Middle left", "Bottom right", "Bottom center", "Bottom left", "Hide"], group = gA)
+posBT   = input.string("Bottom right", "Backtest table",   options = ["Top right", "Top center", "Top left", "Middle right", "Middle left", "Bottom right", "Bottom center", "Bottom left", "Hide"], group = gA)
+tblSize = input.string("Small", "Table text size", options = ["Tiny", "Small", "Normal"], group = gA)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑩ DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════════════════════════
+gD = "⑩ Diagnostics"
+showWhy  = input.bool(true,  "Show 'why blocked' in confluence table", group = gD)
+showNear = input.bool(false, "Label near-miss setups on the chart", group = gD)
+nearOnly = input.bool(false, "Near-miss labels: PE side only", group = gD)
+
+string ceMiss   = (m1On and not m1CE ? "ZL " : "") + (emaActive and not m2CE ? "EMA " : "") + (m4On and not m4CE ? "MACD " : "")
+string peMiss   = (m1On and not m1PE ? "ZL " : "") + (emaActive and not m2PE ? "EMA " : "") + (m4On and not m4PE ? "MACD " : "")
+string ceVetoBy = (m1On and m1Dir == -1 ? "ZL " : "") + (emaActive and m2Dir == -1 ? "EMA " : "") + (m4On and m4Dir == -1 ? "MACD " : "")
+string peVetoBy = (m1On and m1Dir ==  1 ? "ZL " : "") + (emaActive and m2Dir ==  1 ? "EMA " : "") + (m4On and m4Dir ==  1 ? "MACD " : "")
+
+f_why(bool align, int cnt, int veto, bool spanOk, float span, bool mtfOk, int mtfCnt,
+      bool dirOk, bool dwellOk, bool bandOk, string miss, string vetoBy) =>
+    string r = "ready"
+    if activeN == 0
+        r := "no legs enabled"
+    else if cnt < needN
+        r := "need " + str.tostring(needN) + ", have " + str.tostring(cnt) + " — missing: " + miss
+    else if useVeto and veto > 0
+        r := "vetoed by " + vetoBy
+    else if not spanOk
+        r := "signal gap " + (na(span) ? "n/a" : str.tostring(span, "#")) + "b > " + str.tostring(maxSpan)
+    else if not rngOk
+        r := "range " + str.tostring(rng20, "#") + " < " + str.tostring(minRngPts, "#")
+    else if not adxOk
+        r := "ADX " + str.tostring(adxVal, "#.#") + " < " + str.tostring(adxMin, "#")
+    else if not sepOk
+        r := "EMAs coiled " + str.tostring(math.abs(emaDiff), "#.#") + "pt"
+    else if not bandOk
+        r := "inside ZL band"
+    else if not dwellOk
+        r := "re-arm dwell"
+    else if not mtfOk
+        r := "HTF " + str.tostring(mtfCnt) + "/" + str.tostring(minTF)
+    else if not dayOk
+        r := "daily limit (" + str.tostring(trDay) + " tr, " + str.tostring(lossDay) + "L)"
+    else if not dirOk
+        r := "direction filter"
+    else if not sessEntryOk
+        r := "outside entry window"
+    else if not coolOk
+        r := "cooldown"
+    else if pos != 0
+        r := "already in position"
+    else if not align
+        r := "no fresh completion"
+    r
+
+string ceWhy = f_why(alignCE, ceCount, ceVeto, ceSpanOk, ceSpan, mtfCEok, mtfBull, dirCEok, ceDwellOk, bandCEok, ceMiss, ceVetoBy)
+string peWhy = f_why(alignPE, peCount, peVeto, peSpanOk, peSpan, mtfPEok, mtfBear, dirPEok, peDwellOk, bandPEok, peMiss, peVetoBy)
+
+bool ceNear   = activeN > 0 and ceCount >= needN and (not useVeto or ceVeto == 0)
+bool peNear   = activeN > 0 and peCount >= needN and (not useVeto or peVeto == 0)
+bool ceMissed = (ceNear and not ceNear[1] and not ceComplete) or (ceComplete and not trigCE) or (trigCE and blockedByPos)
+bool peMissed = (peNear and not peNear[1] and not peComplete) or (peComplete and not trigPE) or (trigPE and blockedByPos)
+
+if showNear and peMissed and barstate.isconfirmed
+    label.new(bar_index, high, "PE ✗ " + peWhy, style = label.style_label_down, color = color.new(red, 25), textcolor = chart.fg_color, size = size.tiny)
+if showNear and not nearOnly and ceMissed and barstate.isconfirmed
+    label.new(bar_index, low, "CE ✗ " + ceWhy, style = label.style_label_up, color = color.new(green, 25), textcolor = chart.fg_color, size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PLOTS
+// ═══════════════════════════════════════════════════════════════════════════════
+color zlemaColor = trend == 1 ? color.new(green, 70) : color.new(red, 70)
+m     = plot(showZL ? zlema : na, "Zero Lag Basis", linewidth = 2, color = zlemaColor)
+upper = plot(showZL and trend == -1 ? zlema + volatility : na, "Upper Deviation Band", color.new(red, 90),   style = plot.style_linebr)
+lower = plot(showZL and trend ==  1 ? zlema - volatility : na, "Lower Deviation Band", color.new(green, 90), style = plot.style_linebr)
+
+fill(m, upper, (open + close) / 2, zlema + volatility, showFil ? color.new(red, 90)   : na, showFil ? color.new(red, 70)   : na)
+fill(m, lower, (open + close) / 2, zlema - volatility, showFil ? color.new(green, 90) : na, showFil ? color.new(green, 70) : na)
+
+plot(showEma ? fastEma : na, "Fast EMA", color.new(#2962ff, m2On ? 0 : 100), 1)
+plot(showEma ? slowEma : na, "Slow EMA", color.new(#ff9800, m3On ? 0 : 100), 1)
+
+plotshape(showZLs and zlBearFlip ? zlema + volatility : na, "ZL Bearish Trend", shape.labeldown, location.absolute, red,   text = "▼", textcolor = chart.fg_color, size = size.small)
+plotshape(showZLs and zlBullFlip ? zlema - volatility : na, "ZL Bullish Trend", shape.labelup,   location.absolute, green, text = "▲", textcolor = chart.fg_color, size = size.small)
+
+plotshape(showDots and macdUpEvt ? low  - atrVal * dotsDistance : na, "MACD Cross Up",   shape.circle, location.absolute, color.new(green, 20), size = size.tiny)
+plotshape(showDots and macdDnEvt ? high + atrVal * dotsDistance : na, "MACD Cross Down", shape.circle, location.absolute, color.new(red, 20),   size = size.tiny)
+
+bool newCE   = pos ==  1 and pos[1] !=  1
+bool newPE   = pos == -1 and pos[1] != -1
+bool wasExit = pos ==  0 and pos[1] !=  0
+
+plotshape(showCom and newCE ? low  : na, "CE Entry", shape.labelup,   location.belowbar, green, text = "CE", textcolor = chart.fg_color, size = size.small)
+plotshape(showCom and newPE ? high : na, "PE Entry", shape.labeldown, location.abovebar, red,   text = "PE", textcolor = chart.fg_color, size = size.small)
+plotchar(showCom and wasExit ? close : na, "Exit", "×", location.absolute, color.new(chart.fg_color, 20), size = size.small)
+
+plot(showLvl and pos != 0 ? stopPrice : na, "Stop",   color.new(red, 30),   1, plot.style_linebr)
+plot(showLvl and pos != 0 ? takePrice : na, "Target", color.new(green, 30), 1, plot.style_linebr)
+
+bool noTrade = not (rngOk and adxOk) or not dayOk
+bgcolor(showNoTrade and noTrade ? color.new(color.gray, 88) : na, title = "No-trade zone")
+bgcolor(showBg ? (alignCE ? color.new(green, 90) : alignPE ? color.new(red, 90) : na) : na)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  TABLES
+// ═══════════════════════════════════════════════════════════════════════════════
+sz = tblSize == "Tiny" ? size.tiny : tblSize == "Normal" ? size.normal : size.small
+
+pMTF = posMTF == "Top right" ? position.top_right : posMTF == "Top center" ? position.top_center
+     : posMTF == "Top left" ? position.top_left : posMTF == "Middle right" ? position.middle_right
+     : posMTF == "Middle left" ? position.middle_left : posMTF == "Bottom right" ? position.bottom_right
+     : posMTF == "Bottom center" ? position.bottom_center : position.bottom_left
+pMOD = posMOD == "Top right" ? position.top_right : posMOD == "Top center" ? position.top_center
+     : posMOD == "Top left" ? position.top_left : posMOD == "Middle right" ? position.middle_right
+     : posMOD == "Middle left" ? position.middle_left : posMOD == "Bottom right" ? position.bottom_right
+     : posMOD == "Bottom center" ? position.bottom_center : position.bottom_left
+pBT  = posBT == "Top right" ? position.top_right : posBT == "Top center" ? position.top_center
+     : posBT == "Top left" ? position.top_left : posBT == "Middle right" ? position.middle_right
+     : posBT == "Middle left" ? position.middle_left : posBT == "Bottom right" ? position.bottom_right
+     : posBT == "Bottom center" ? position.bottom_center : position.bottom_left
+
+var table mtfTbl = table.new(pMTF, 2, 6,  bgcolor = chart.bg_color, border_width = 1, border_color = color.new(chart.fg_color, 50), frame_color = color.new(chart.fg_color, 50), frame_width = 1)
+var table modTbl = table.new(pMOD, 4, 12, bgcolor = chart.bg_color, border_width = 1, border_color = color.new(chart.fg_color, 50), frame_color = color.new(chart.fg_color, 50), frame_width = 1)
+var table btTbl  = table.new(pBT,  2, 27, bgcolor = chart.bg_color, border_width = 1, border_color = color.new(chart.fg_color, 50), frame_color = color.new(chart.fg_color, 50), frame_width = 1)
+
+f_bt(int r, string k, string v, color c) =>
+    table.cell(btTbl, 0, r, k, text_size = sz, text_halign = text.align_left,  text_color = chart.fg_color)
+    table.cell(btTbl, 1, r, v, text_size = sz, text_halign = text.align_right, text_color = c)
+
+if barstate.islast
+    if posMTF != "Hide"
+        table.cell(mtfTbl, 0, 0, "Time Frame", text_halign = text.align_center, text_color = chart.fg_color, text_size = sz)
+        table.cell(mtfTbl, 1, 0, "ZL Signal",  text_halign = text.align_center, text_color = chart.fg_color, text_size = sz)
+        table.cell(mtfTbl, 0, 1, t1, text_halign = text.align_center, text_color = chart.fg_color, text_size = sz)
+        table.cell(mtfTbl, 1, 1, s1 == 1 ? "Bullish" : "Bearish", text_halign = text.align_center, text_color = chart.fg_color, text_size = sz, bgcolor = s1 == 1 ? color.new(green, 70) : color.new(red, 70))
+        table.cell(mtfTbl, 0, 2, t2, text_halign = text.align_center, text_color = chart.fg_color, text_size = sz)
+        table.cell(mtfTbl, 1, 2, s2 == 1 ? "Bullish" : "Bearish", text_halign = text.align_center, text_color = chart.fg_color, text_size = sz, bgcolor = s2 == 1 ? color.new(green, 70) : color.new(red, 70))
+        table.cell(mtfTbl, 0, 3, t3, text_halign = text.align_center, text_color = chart.fg_color, text_size = sz)
+        table.cell(mtfTbl, 1, 3, s3 == 1 ? "Bullish" : "Bearish", text_halign = text.align_center, text_color = chart.fg_color, text_size = sz, bgcolor = s3 == 1 ? color.new(green, 70) : color.new(red, 70))
+        table.cell(mtfTbl, 0, 4, t4, text_halign = text.align_center, text_color = chart.fg_color, text_size = sz)
+        table.cell(mtfTbl, 1, 4, s4 == 1 ? "Bullish" : "Bearish", text_halign = text.align_center, text_color = chart.fg_color, text_size = sz, bgcolor = s4 == 1 ? color.new(green, 70) : color.new(red, 70))
+        table.cell(mtfTbl, 0, 5, t5, text_halign = text.align_center, text_color = chart.fg_color, text_size = sz)
+        table.cell(mtfTbl, 1, 5, s5 == 1 ? "Bullish" : "Bearish", text_halign = text.align_center, text_color = chart.fg_color, text_size = sz, bgcolor = s5 == 1 ? color.new(green, 70) : color.new(red, 70))
+
+    if posMOD != "Hide"
+        table.cell(modTbl, 0, 0, "Leg", text_halign = text.align_left,   text_color = chart.fg_color, text_size = sz, bgcolor = color.new(chart.fg_color, 85))
+        table.cell(modTbl, 1, 0, "CE",  text_halign = text.align_center, text_color = chart.fg_color, text_size = sz, bgcolor = color.new(chart.fg_color, 85))
+        table.cell(modTbl, 2, 0, "PE",  text_halign = text.align_center, text_color = chart.fg_color, text_size = sz, bgcolor = color.new(chart.fg_color, 85))
+        table.cell(modTbl, 3, 0, "Age", text_halign = text.align_right,  text_color = chart.fg_color, text_size = sz, bgcolor = color.new(chart.fg_color, 85))
+
+        table.cell(modTbl, 0, 1, "① ZL Trend", text_halign = text.align_left, text_size = sz, text_color = m1On ? chart.fg_color : color.new(chart.fg_color, 60))
+        table.cell(modTbl, 1, 1, not m1On ? "–" : m1CE ? "✔" : "·", text_halign = text.align_center, text_size = sz, text_color = chart.fg_color, bgcolor = m1On and m1CE ? color.new(green, 55) : na)
+        table.cell(modTbl, 2, 1, not m1On ? "–" : m1PE ? "✔" : "·", text_halign = text.align_center, text_size = sz, text_color = chart.fg_color, bgcolor = m1On and m1PE ? color.new(red, 55) : na)
+        table.cell(modTbl, 3, 1, not m1On ? "" : str.tostring(m1Dir == 1 ? nz(zlUpAgo, -1) : nz(zlDnAgo, -1), "#") + "b", text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        table.cell(modTbl, 0, 2, "②③ EMA", text_halign = text.align_left, text_size = sz, text_color = emaActive ? chart.fg_color : color.new(chart.fg_color, 60))
+        table.cell(modTbl, 1, 2, not emaActive ? "–" : m2CE ? "✔" : "·", text_halign = text.align_center, text_size = sz, text_color = chart.fg_color, bgcolor = emaActive and m2CE ? color.new(green, 55) : na)
+        table.cell(modTbl, 2, 2, not emaActive ? "–" : m2PE ? "✔" : "·", text_halign = text.align_center, text_size = sz, text_color = chart.fg_color, bgcolor = emaActive and m2PE ? color.new(red, 55) : na)
+        table.cell(modTbl, 3, 2, not emaActive ? "" : (kissRaw ? "kiss " : "") + str.tostring(emaDiff, "#.#") + "pt", text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        table.cell(modTbl, 0, 3, "④ ZL MACD", text_halign = text.align_left, text_size = sz, text_color = m4On ? chart.fg_color : color.new(chart.fg_color, 60))
+        table.cell(modTbl, 1, 3, not m4On ? "–" : m4CE ? "✔" : "·", text_halign = text.align_center, text_size = sz, text_color = chart.fg_color, bgcolor = m4On and m4CE ? color.new(green, 55) : na)
+        table.cell(modTbl, 2, 3, not m4On ? "–" : m4PE ? "✔" : "·", text_halign = text.align_center, text_size = sz, text_color = chart.fg_color, bgcolor = m4On and m4PE ? color.new(red, 55) : na)
+        table.cell(modTbl, 3, 3, not m4On ? "" : str.tostring(m4Dir == 1 ? nz(m4UpAgo, -1) : nz(m4DnAgo, -1), "#") + "b", text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        table.cell(modTbl, 0, 4, "Count", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+        table.cell(modTbl, 1, 4, str.tostring(ceCount) + "/" + str.tostring(needN), text_halign = text.align_center, text_size = sz, text_color = chart.fg_color)
+        table.cell(modTbl, 2, 4, str.tostring(peCount) + "/" + str.tostring(needN), text_halign = text.align_center, text_size = sz, text_color = chart.fg_color)
+        table.cell(modTbl, 3, 4, "", text_size = sz)
+
+        table.cell(modTbl, 0, 5, "Veto", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+        table.cell(modTbl, 1, 5, ceVeto == 0 ? "–" : ceVetoBy, text_halign = text.align_center, text_size = sz, text_color = ceVeto == 0 ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 2, 5, peVeto == 0 ? "–" : peVetoBy, text_halign = text.align_center, text_size = sz, text_color = peVeto == 0 ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 3, 5, useVeto ? "on" : "off", text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        table.cell(modTbl, 0, 6, "Range " + str.tostring(rngLen) + "b", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+        table.cell(modTbl, 1, 6, str.tostring(rng20, "#.#") + "pt", text_halign = text.align_center, text_size = sz, text_color = rngOk ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 2, 6, "ADX " + str.tostring(adxVal, "#.#"), text_halign = text.align_center, text_size = sz, text_color = adxOk ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 3, 6, (useRngF ? "≥" + str.tostring(minRngPts, "#") : "off") + " / " + (useAdx ? "≥" + str.tostring(adxMin, "#") : "off"), text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        table.cell(modTbl, 0, 7, "Span", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+        table.cell(modTbl, 1, 7, na(ceSpan) ? "n/a" : str.tostring(ceSpan, "#") + "b", text_halign = text.align_center, text_size = sz, text_color = ceSpanOk ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 2, 7, na(peSpan) ? "n/a" : str.tostring(peSpan, "#") + "b", text_halign = text.align_center, text_size = sz, text_color = peSpanOk ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 3, 7, not useSpan ? "off" : spanInert ? "INERT ≥" + str.tostring(spanCeil) : "≤" + str.tostring(maxSpan),
+             text_halign = text.align_right, text_size = sz, text_color = spanInert and useSpan ? color.new(#ffa726, 0) : color.new(chart.fg_color, 25))
+
+        table.cell(modTbl, 0, 8, "HTF", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+        table.cell(modTbl, 1, 8, str.tostring(mtfBull) + "/5", text_halign = text.align_center, text_size = sz, text_color = mtfCEok ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 2, 8, str.tostring(mtfBear) + "/5", text_halign = text.align_center, text_size = sz, text_color = mtfPEok ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 3, 8, useMTF ? "≥" + str.tostring(minTF) : "off", text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        table.cell(modTbl, 0, 9, "Today", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+        table.cell(modTbl, 1, 9, str.tostring(trDay) + "/" + (maxTrDay == 0 ? "∞" : str.tostring(maxTrDay)), text_halign = text.align_center, text_size = sz, text_color = dayOk ? chart.fg_color : color.new(red, 0))
+        table.cell(modTbl, 2, 9, "₹" + str.tostring(pnlDay, "#"), text_halign = text.align_center, text_size = sz, text_color = pnlDay >= 0 ? color.new(#26a69a, 0) : color.new(#ef5350, 0))
+        table.cell(modTbl, 3, 9, str.tostring(lossDay) + "L", text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        string st = pos == 1 ? "IN CE" : pos == -1 ? "IN PE" : alignCE ? "CE ARMED" : alignPE ? "PE ARMED" : noTrade ? "STAND DOWN" : "WAITING"
+        table.cell(modTbl, 0, 10, "Status", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+        table.cell(modTbl, 1, 10, st, text_halign = text.align_center, text_size = sz, text_color = chart.fg_color,
+             bgcolor = pos == 1 or alignCE ? color.new(green, 45) : pos == -1 or alignPE ? color.new(red, 45) : color.new(chart.fg_color, 85))
+        table.cell(modTbl, 2, 10, pos != 0 ? "SL " + str.tostring(stopPrice, format.mintick) : "", text_halign = text.align_center, text_size = sz, text_color = color.new(chart.fg_color, 25))
+        table.cell(modTbl, 3, 10, pos != 0 ? "TP " + str.tostring(takePrice, format.mintick) : "", text_halign = text.align_right, text_size = sz, text_color = color.new(chart.fg_color, 25))
+
+        if showWhy
+            table.cell(modTbl, 0, 11, "Why", text_halign = text.align_left, text_color = chart.fg_color, text_size = sz)
+            table.cell(modTbl, 1, 11, "CE: " + ceWhy + "\nPE: " + peWhy, text_halign = text.align_left, text_size = sz, text_color = color.new(chart.fg_color, 10))
+            table.cell(modTbl, 2, 11, "", text_size = sz)
+            table.cell(modTbl, 3, 11, "", text_size = sz)
+
+    if posBT != "Hide"
+        int   trades  = nWin + nLoss
+        float netPnl  = equity - capital
+        float netPct  = netPnl / capital * 100
+        float pf      = grossLos > 0 ? grossWin / grossLos : grossWin > 0 ? 999 : 0
+        float wr      = trades > 0 ? nWin / trades * 100 : 0
+        float avgW    = nWin  > 0 ? grossWin / nWin  : 0
+        float avgL    = nLoss > 0 ? grossLos / nLoss : 0
+        float wlR     = avgL > 0 ? avgW / avgL : avgW > 0 ? 999 : 0
+        float expct   = trades > 0 ? netPnl / trades : 0
+        float avgBar  = trades > 0 ? totHeld / trades : 0
+        float avgPts  = trades > 0 ? totPts / trades : 0
+        float avgRmul = trades > 0 ? totR / trades : 0
+        float ambPct  = trades > 0 ? nAmbig / trades * 100 : 0
+        float bar1Pct = trades > 0 ? nBar1  / trades * 100 : 0
+        float perPt   = instMode == "Options (delta)" ? optDelta * units : idxSize
+        float rr      = slPts > 0 ? tpPts / slPts : na
+        float beWin   = tpPts + slPts > 0 ? (slPts * perPt + tripCharge) / ((tpPts + slPts) * perPt) * 100 : na
+        color up      = color.new(#26a69a, 0)
+        color dn      = color.new(#ef5350, 0)
+        color nt      = chart.fg_color
+
+        table.cell(btTbl, 0, 0, "SCALP BACKTEST", text_size = sz, text_color = chart.fg_color, bgcolor = color.new(chart.fg_color, 85))
+        table.cell(btTbl, 1, 0, str.tostring(lots) + "L × " + str.tostring(lotSize) + " · Δ" + str.tostring(optDelta, "0.00"), text_size = sz, text_halign = text.align_right, text_color = chart.fg_color, bgcolor = color.new(chart.fg_color, 85))
+
+        f_bt(1,  "Net P&L (₹)",        str.tostring(netPnl, "#.##"),          netPnl >= 0 ? up : dn)
+        f_bt(2,  "Return on capital",  str.tostring(netPct, "#.##") + " %",   netPct >= 0 ? up : dn)
+        f_bt(3,  "Expectancy (₹)",     str.tostring(expct, "#.##"),           expct >= 0 ? up : dn)
+        f_bt(4,  "Expectancy (R)",     str.tostring(avgRmul, "#.###"),        avgRmul >= 0 ? up : dn)
+        f_bt(5,  "Reward : risk",      na(rr) ? "–" : str.tostring(rr, "#.##") + " : 1", rr >= 1.5 ? up : dn)
+        f_bt(6,  "Breakeven win rate", na(beWin) ? "–" : str.tostring(beWin, "#.#") + " %", nt)
+        f_bt(7,  "Win rate",           str.tostring(wr, "#.##") + " %",       wr >= nz(beWin, 50) ? up : dn)
+        f_bt(8,  "── validity ──",     "",                                     nt)
+        f_bt(9,  "Ambiguous SL+TP",    str.tostring(nAmbig) + "  (" + str.tostring(ambPct, "#.#") + "%)", ambPct > 20 ? dn : nt)
+        f_bt(10, "Resolved in ≤1 bar", str.tostring(nBar1) + "  (" + str.tostring(bar1Pct, "#.#") + "%)", bar1Pct > 50 ? dn : nt)
+        f_bt(11, "Avg bars held",      str.tostring(avgBar, "#.#"),           avgBar < 2 ? dn : nt)
+        f_bt(12, "── results ──",      "",                                     nt)
+        f_bt(13, "Profit factor",      str.tostring(pf, "#.##"),              pf >= 1 ? up : dn)
+        f_bt(14, "Total trades",       str.tostring(trades),                  nt)
+        f_bt(15, "Wins / Losses",      str.tostring(nWin) + " / " + str.tostring(nLoss), nt)
+        f_bt(16, "Max drawdown %",     str.tostring(maxDDpct, "#.##") + " %", dn)
+        f_bt(17, "Max drawdown (₹)",   str.tostring(maxDDabs, "#.##"),        dn)
+        f_bt(18, "Charges paid (₹)",   str.tostring(totChg, "#.##"),          dn)
+        f_bt(19, "₹ per index point",  str.tostring(perPt, "#.##"),           nt)
+        f_bt(20, "Avg win (₹)",        str.tostring(avgW, "#.##"),            up)
+        f_bt(21, "Avg loss (₹)",       str.tostring(avgL, "#.##"),            dn)
+        f_bt(22, "Avg win / loss",     str.tostring(wlR, "#.##"),             wlR >= 1 ? up : dn)
+        f_bt(23, "Max consec L / W",   str.tostring(maxRunL) + " / " + str.tostring(maxRunW), nt)
+        f_bt(24, "Avg index pts/trade",str.tostring(avgPts, "#.##"),          avgPts >= 0 ? up : dn)
+        f_bt(25, "Exit SL/TP/Sig/T/S", str.tostring(nSL) + "/" + str.tostring(nTP) + "/" + str.tostring(nSig) + "/" + str.tostring(nTime) + "/" + str.tostring(nSess), nt)
+        f_bt(26, "CE ₹ / PE ₹",        str.tostring(ceProfit, "#.#") + " / " + str.tostring(peProfit, "#.#"), ceProfit + peProfit >= 0 ? up : dn)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+alertcondition(pos ==  1 and pos[1] !=  1, "CE Entry", "CE confluence complete — buy CE")
+alertcondition(pos == -1 and pos[1] != -1, "PE Entry", "PE confluence complete — buy PE")
+alertcondition(pos ==  0 and pos[1] !=  0, "Exit",     "Scalp exit hit")
+alertcondition(zlBullFlip, "ZL Bullish Trend", "Zero Lag trend turned bullish")
+alertcondition(zlBearFlip, "ZL Bearish Trend", "Zero Lag trend turned bearish")
+alertcondition(emaUpEvt,   "EMA Bullish Cross", "Fast EMA crossed above slow EMA")
+alertcondition(emaDnEvt,   "EMA Bearish Cross", "Fast EMA crossed below slow EMA")
+alertcondition(macdUpEvt,  "ZL MACD Bullish Cross", "Zero Lag MACD crossed above its signal")
+alertcondition(macdDnEvt,  "ZL MACD Bearish Cross", "Zero Lag MACD crossed below its signal")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ⑬ WEBHOOK JSON ALERTS  →  TradeShala paper-trading ledger
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Native entry/exit dialect: an "exit" event closes the ledger position, an
+//  "entry" opens the next one. `pos` always flattens before re-entering.
+//
+//  SETUP: add to the underlying's chart → one alert → "Any alert() function call"
+//  → webhook URL with ?secret=YOUR_SECRET appended. Fires on bar close only.
+//
+//  NOTE ON sl / tp: these are INDEX levels, not option premium levels. If your
+//  ledger places brackets on the option LTP, it must convert them via delta.
+//
+//  JSON FORMATTING RULE (2026-08-14 fix): any numeric field that can be < 1 in
+//  absolute value MUST use a leading-zero format ("0.00" / "0.##"), never "#.##"
+//  — Pine's '#' is an OPTIONAL digit and drops the integer 0, producing ".60",
+//  which is INVALID JSON and gets the whole alert rejected. Prices/SL/TP are in
+//  the thousands so "#.##" is safe for them; delta and index_points are not.
+// ═══════════════════════════════════════════════════════════════════════════════
+gW = "⑬ Webhook Alerts"
+whOn     = input.bool  (true, "Emit webhook JSON alerts", group = gW)
+whStrat  = input.string("Confluence-Scalper-v2", "Strategy name (ledger key)", group = gW)
+whSymOvr = input.string("", "Symbol override (blank = chart ticker)", group = gW)
+whQty    = input.int   (1, "Qty in payload", minval = 1, group = gW)
+whSecret = input.string("", "Secret in body (blank = pass ?secret= in the URL)", group = gW)
+
+string whSym = whSymOvr == "" ? syminfo.ticker : whSymOvr
+
+f_secretField() =>
+    whSecret == "" ? "" : '"secret":"' + whSecret + '",'
+
+// seq lets the receiver order a same-bar exit-then-entry pair deterministically,
+// since HTTP delivery order is not guaranteed.
+f_entryJson(string sideStr, string optStr, float px, float slv, float tpv, string kind) =>
+    '{' + f_secretField() + '"event":"entry"'
+     + ',"seq":2'
+     + ',"strategy":"' + whStrat + '"'
+     + ',"symbol":"'   + whSym + '"'
+     + ',"side":"'     + sideStr + '"'
+     + ',"option_type":"' + optStr + '"'
+     + ',"timeframe":"' + timeframe.period + '"'
+     + ',"price":' + str.tostring(px,  "#.##")
+     + ',"sl":'    + str.tostring(slv, "#.##")
+     + ',"tp":'    + str.tostring(tpv, "#.##")
+     + ',"sl_points":' + str.tostring(math.abs(px - slv), "0.##")
+     + ',"tp_points":' + str.tostring(math.abs(tpv - px), "0.##")
+     + ',"delta":' + str.tostring(optDelta, "0.00")
+     + ',"lots":'  + str.tostring(lots)
+     + ',"qty":'   + str.tostring(whQty)
+     + ',"time":'  + str.tostring(time)
+     + ',"id":"'   + whStrat + '-' + kind + '-' + str.tostring(time) + '"}'
+
+f_exitJson(float px, string reason, float pts) =>
+    '{' + f_secretField() + '"event":"exit"'
+     + ',"seq":1'
+     + ',"strategy":"' + whStrat + '"'
+     + ',"symbol":"'   + whSym + '"'
+     + ',"reason":"'   + reason + '"'
+     + ',"price":' + str.tostring(px, "#.##")
+     + ',"index_points":' + str.tostring(pts, "0.##")
+     + ',"qty":'   + str.tostring(whQty)
+     + ',"time":'  + str.tostring(time)
+     + ',"id":"'   + whStrat + '-EXIT-' + str.tostring(time) + '"}'
+
+bool waNewCE = pos ==  1 and pos[1] !=  1
+bool waNewPE = pos == -1 and pos[1] != -1
+
+// exitKind / exitPrice / exitTag are this bar's fill; entryPrice[1] is the price we
+// entered at, since entryPrice may already hold a same-bar re-entry.
+float waExitPts = doExit ? (exitPrice - nz(entryPrice[1], exitPrice)) * nz(pos[1], 0) : 0
+
+if whOn and doExit
+    alert(f_exitJson(exitPrice, exitTag, waExitPts), alert.freq_once_per_bar_close)
+if whOn and waNewCE
+    alert(f_entryJson("long",  "CALL", close, stopPrice, takePrice, "CE"), alert.freq_once_per_bar_close)
+if whOn and waNewPE
+    alert(f_entryJson("short", "PUT",  close, stopPrice, takePrice, "PE"), alert.freq_once_per_bar_close)

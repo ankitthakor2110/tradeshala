@@ -14,6 +14,7 @@ export const dashboardConfig = {
       { label: "Trade", href: "/dashboard/trade", icon: "trade" },
       { label: "Positions", href: "/dashboard/positions", icon: "positions" },
       { label: "Signals", href: "/dashboard/signals", icon: "signal" },
+      { label: "Auto Trading", href: "/dashboard/auto", icon: "robot" },
       { label: "Journal", href: "/dashboard/journal", icon: "journal" },
       { label: "Portfolio", href: "/dashboard/portfolio", icon: "briefcase" },
       { label: "Watchlist", href: "/dashboard/watchlist", icon: "eye" },
@@ -36,6 +37,7 @@ export const dashboardConfig = {
       "/dashboard/trades": "Trades",
       "/dashboard/positions": "Positions",
       "/dashboard/signals": "TradingView Signals",
+      "/dashboard/auto": "Trading Configuration",
       "/dashboard/watchlist": "Watchlist",
       "/dashboard/settings": "Settings",
       "/dashboard/profile": "Profile & Settings",
@@ -101,7 +103,7 @@ export const dashboardConfig = {
   ] as IndexData[],
 
   mockGainers: [
-    { symbol: "TATAMOTORS", change: 18.5, changePercent: 3.2, isPositive: true },
+    { symbol: "TMPV", change: 18.5, changePercent: 3.2, isPositive: true },
     { symbol: "RELIANCE", change: 68.4, changePercent: 2.8, isPositive: true },
     { symbol: "HDFCBANK", change: 32.1, changePercent: 2.1, isPositive: true },
     { symbol: "INFY", change: 28.6, changePercent: 1.9, isPositive: true },

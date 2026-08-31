@@ -80,6 +80,12 @@ export default function SidebarIcon({
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
         </svg>
       );
+    case "robot":
+      return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 3v3m-4 0h8a3 3 0 013 3v7a3 3 0 01-3 3H8a3 3 0 01-3-3V9a3 3 0 013-3zm1 6.5h.01M15 12.5h.01M9 16h6" />
+        </svg>
+      );
     case "settings":
       return (
         <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">

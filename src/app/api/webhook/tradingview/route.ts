@@ -143,14 +143,29 @@ export async function POST(req: NextRequest) {
         applied.handled === "closed" ||
         applied.handled === "reversed";
 
-      // --- ENGINE EXECUTION (best-effort) ---
+      // --- AUTOMATIC TRADE TAKER (best-effort) ---
       // Lazy-import keeps the heavy market-data module graph off the cold-start
       // path. A failure here never affects the ledger (already written).
+      // If the configured trade account has a trading_configs row, the
+      // config-driven auto-trader owns execution (and writes the auto_trade_
+      // decisions audit row). If not, fall back to the legacy env engine so
+      // existing deployments keep working unchanged.
       try {
-        const { executeOnEngine } = await import("@/services/trade-engine.server");
-        const engine = await executeOnEngine(admin, payload, applied.handled);
-        if (engine && !engine.executed) {
-          console.warn(`[tv-webhook] engine not executed: ${engine.detail}`);
+        const { runAutoTrade } = await import("@/services/auto-trade.server");
+        const auto = await runAutoTrade(admin, {
+          payload,
+          raw: parsed,
+          webhookLogId: logId,
+          dedupeKey: key,
+        });
+        if (!auto.handled) {
+          const { executeOnEngine } = await import("@/services/trade-engine.server");
+          const engine = await executeOnEngine(admin, payload, applied.handled);
+          if (engine && !engine.executed) {
+            console.warn(`[tv-webhook] engine not executed: ${engine.detail}`);
+          }
+        } else if (auto.status && auto.status !== "EXECUTED") {
+          console.warn(`[tv-webhook] auto-trade ${auto.status}: ${auto.detail}`);
         }
       } catch (e) {
         console.error(`[tv-webhook] engine error:`, (e as Error).message);

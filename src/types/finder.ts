@@ -1,4 +1,5 @@
 import type { MarketData } from "./database";
+import type { RawEvent } from "@/lib/intel/events";
 
 // Types for the Trade Finder / Screener (`/dashboard/finder`). The screener is a
 // multi-symbol momentum scanner built entirely on real provider quotes — every
@@ -33,6 +34,7 @@ export type ScreenerPreset =
   | "gainers"
   | "losers"
   | "highVolume"
+  | "unusualVolume"
   | "watchlist";
 
 export interface ScreenerFilters {
@@ -65,4 +67,13 @@ export interface LargeDealsResponse {
   /** NSE `as_on_date` for the batch. */
   asOn: string | null;
   source: "nse" | "unavailable";
+}
+
+// --- Economic calendar (auto-fetched macro events for the event-risk gate) ---
+
+/** Shape returned by `/api/market-data/economic-calendar` (FMP-sourced). */
+export interface EconomicCalendarResponse {
+  events: RawEvent[];
+  source: "fmp" | "unavailable";
+  coverageThrough: string | null;
 }

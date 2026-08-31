@@ -1,4 +1,8 @@
-import type { ScreenerResponse, LargeDealsResponse } from "@/types/finder";
+import type {
+  ScreenerResponse,
+  LargeDealsResponse,
+  EconomicCalendarResponse,
+} from "@/types/finder";
 import type { FinderAlert } from "@/lib/finder/alerts";
 
 /**
@@ -41,6 +45,29 @@ export async function getLargeDeals(): Promise<LargeDealsResponse | null> {
       return null;
     }
     return (await res.json()) as LargeDealsResponse;
+  } catch {
+    return null;
+  }
+}
+
+/** Auto-fetched macro event calendar (FMP). Fails soft to an unavailable shape. */
+export async function getEconomicCalendar(): Promise<EconomicCalendarResponse> {
+  try {
+    const res = await fetch("/api/market-data/economic-calendar");
+    if (!res.ok) return { events: [], source: "unavailable", coverageThrough: null };
+    return (await res.json()) as EconomicCalendarResponse;
+  } catch {
+    return { events: [], source: "unavailable", coverageThrough: null };
+  }
+}
+
+/** Nearest option expiry ("YYYY-MM-DD") for a symbol, or null. Never throws. */
+export async function getNearestExpiry(symbol: string): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/trade/expiries?symbol=${encodeURIComponent(symbol)}`);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { expiries?: string[] };
+    return json.expiries?.[0] ?? null;
   } catch {
     return null;
   }

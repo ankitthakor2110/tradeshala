@@ -1,7 +1,8 @@
 import type { OptionChainData } from "@/types/database";
 import { getSharedUpstoxToken } from "@/lib/market-data/upstox";
-import { resolveEquityKey } from "@/lib/market-data/upstox-instruments";
+import { resolveEquityKey, resolveLotSize } from "@/lib/market-data/upstox-instruments";
 import { getQuote } from "@/lib/market-data";
+import { TRADE_CONFIG } from "@/config/trade";
 
 // Shared server-side option-chain fetch (Dhan → Upstox → mock). Used by the
 // /api/trade/option-chain route, the GTT executor, and the IV-history writer so
@@ -14,6 +15,9 @@ export interface ChainResponse {
   atmStrike: number;
   chain: OptionChainData[];
   source: "dhan" | "upstox" | "mock";
+  // F&O lot size for the underlying (index or stock). Set by fetchOptionChain from
+  // the instrument master; the internal fetchers leave it undefined.
+  lotSize?: number;
 }
 
 export const STRIKE_GAPS: Record<string, number> = {
@@ -307,13 +311,18 @@ export function generateMockChain(symbol: string, expiry: string, anchorPrice?: 
 
 /** Dhan → Upstox → mock, returning the first non-empty chain. */
 export async function fetchOptionChain(symbol: string, expiry: string): Promise<ChainResponse> {
+  // Lot size is per underlying (not per expiry/source), so resolve it once and
+  // stamp it on whichever chain wins. Instrument master → static index map → 1.
+  const lotSize =
+    (await resolveLotSize(symbol)) ?? TRADE_CONFIG.defaultLotSizes[symbol.toUpperCase()] ?? 1;
+
   const dhan = await fetchDhan(symbol, expiry);
-  if (dhan && dhan.chain.length > 0) return dhan;
+  if (dhan && dhan.chain.length > 0) return { ...dhan, lotSize };
   const upstox = await fetchUpstox(symbol, expiry);
-  if (upstox && upstox.chain.length > 0) return upstox;
+  if (upstox && upstox.chain.length > 0) return { ...upstox, lotSize };
   // No live chain (non-F&O stock, or feed down): anchor the mock to the real
   // underlying quote so strikes bracket the actual price rather than a stale
   // index-shaped default. Indices carry their own default when the quote misses.
   const quote = await getQuote(symbol).catch(() => null);
-  return generateMockChain(symbol, expiry, quote?.data?.last_price);
+  return { ...generateMockChain(symbol, expiry, quote?.data?.last_price), lotSize };
 }

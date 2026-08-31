@@ -6,6 +6,7 @@ import { getWatchlist } from "@/services/watchlist.service";
 import { createClient } from "@/lib/supabase/client";
 import { buildScreenerView } from "@/lib/finder/screener";
 import { alertCandidates } from "@/lib/finder/alerts";
+import { updateVolumeState, volumeSurges, type VolumeState } from "@/lib/finder/volume";
 import { FINDER_CONFIG } from "@/config/finder";
 import type {
   ScreenerRow,
@@ -59,6 +60,8 @@ export function useScreener() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [watchlist, setWatchlist] = useState<Set<string>>(new Set());
+  const [surges, setSurges] = useState<Map<string, number>>(new Map());
+  const volumeState = useRef<VolumeState>({});
   const inFlight = useRef(false);
 
   const setConfig = useCallback((patch: Partial<FinderConfigState>) => {
@@ -102,6 +105,15 @@ export function useScreener() {
         setRows(res.rows);
         setSource(res.source);
         setLastUpdated(res.last_updated);
+        // Fold this poll's volumes into the session diff and recompute surges.
+        const nextVol = updateVolumeState(
+          volumeState.current,
+          res.rows,
+          Date.now(),
+          FINDER_CONFIG.volume.maxSamples
+        );
+        volumeState.current = nextVol;
+        setSurges(volumeSurges(nextVol, FINDER_CONFIG.volume.surgeThreshold, FINDER_CONFIG.volume.minSamples));
       }
     } finally {
       inFlight.current = false;
@@ -136,6 +148,8 @@ export function useScreener() {
     if (candidates.length) void postFinderAlerts(candidates);
   }, [rows, config.alertsEnabled, config.alertThreshold]);
 
+  const surgeSet = useMemo(() => new Set(surges.keys()), [surges]);
+
   const view = useMemo(
     () =>
       buildScreenerView(
@@ -143,9 +157,10 @@ export function useScreener() {
         { preset: config.preset, minAbsChangePct: config.minAbsChangePct },
         config.sortKey,
         config.sortDir,
-        watchlist
+        watchlist,
+        surgeSet
       ),
-    [rows, config.preset, config.minAbsChangePct, config.sortKey, config.sortDir, watchlist]
+    [rows, config.preset, config.minAbsChangePct, config.sortKey, config.sortDir, watchlist, surgeSet]
   );
 
   return {
@@ -155,6 +170,7 @@ export function useScreener() {
     source,
     lastUpdated,
     watchlist,
+    surges,
     config,
     setConfig,
     refresh,

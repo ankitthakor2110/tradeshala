@@ -60,7 +60,7 @@ function optionTypeFor(p: EntryPayload): "CE" | "PE" {
 }
 
 /** The configured simulator account (profiles.email → id), or null if unset/missing. */
-async function resolveTradeUserId(admin: Admin): Promise<string | null> {
+export async function resolveTradeUserId(admin: Admin): Promise<string | null> {
   const email = TV_WEBHOOK_CONFIG.tradeUserEmail;
   if (!email) return null;
   const { data } = await admin
@@ -135,7 +135,7 @@ async function resolveEntryStrike(
   return { expiry, strike: row.strike_price, premium, source: chain.source, byDelta };
 }
 
-// --- Open: BUY the ~target-delta option to open a fresh LONG position ---
+// --- Open: BUY the ~target-delta option to open a fresh LONG position (env path) ---
 async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload): Promise<EngineResult> {
   const symbol = p.symbol.toUpperCase();
   const lotSize = TRADE_CONFIG.defaultLotSizes[symbol];
@@ -159,14 +159,77 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
   // Deterministic sizing: TV_ENGINE_LOTS lots regardless of the payload qty.
   const lots = Math.max(1, Math.round(TV_WEBHOOK_CONFIG.engineLots));
   const quantity = lots * lotSize;
+  const strikeNote = pick.byDelta ? `~${TV_WEBHOOK_CONFIG.engineTargetDelta}Δ` : "ATM";
+
+  return placeOptionBuyToOpen(admin, userId, {
+    strategy: p.strategy,
+    symbol,
+    optionType,
+    expiry: pick.expiry,
+    strike: pick.strike,
+    premium: pick.premium,
+    source: pick.source,
+    quantity,
+    lotSize,
+    // Premium-points bracket off the fill; the GTT pass auto-exits on either.
+    targetPoints: TV_WEBHOOK_CONFIG.engineTargetPoints,
+    stopPoints: TV_WEBHOOK_CONFIG.engineStopPoints,
+    strikeNote,
+    note: `TradingView: ${p.strategy}`,
+  });
+}
+
+/** Bracket for an option BUY-to-open. Provide EITHER absolute target/stopLoss
+ * prices OR points offsets off the fill (targetPoints/stopPoints). */
+export interface OptionBuyParams {
+  strategy: string;
+  symbol: string;
+  optionType: "CE" | "PE";
+  expiry: string;
+  strike: number;
+  /** Reference premium used to size the fill (typically the chain LTP). */
+  premium: number;
+  source: string;
+  quantity: number;
+  lotSize: number;
+  /** Absolute bracket (config-driven path). */
+  target?: number;
+  stopLoss?: number;
+  trailAmount?: number | null;
+  /** Breakeven: raise stop to entry + beOffset once profit reaches beActivation. */
+  beActivation?: number | null;
+  beOffset?: number;
+  /** Points bracket off the fill (legacy env path). */
+  targetPoints?: number;
+  stopPoints?: number;
+  /** Short label for the detail string (e.g. "Δ 0.60", "ATM"). */
+  strikeNote?: string;
+  note?: string;
+}
+
+/**
+ * Shared BUY-to-open path: simulate the fill, write the order + position (with a
+ * target/stop/trail bracket the GTT pass monitors), move virtual cash, and record
+ * the tv_engine_positions link so a later exit closes this exact contract. Fully
+ * compensating: any failed step rolls back the prior ones. Reused by both the env
+ * engine and the config-driven auto-trader.
+ */
+export async function placeOptionBuyToOpen(
+  admin: Admin,
+  userId: string,
+  params: OptionBuyParams
+): Promise<EngineResult> {
+  const { symbol, optionType, expiry, strike, premium, source, quantity, lotSize } = params;
+  const exch = exchangeFor(symbol);
+
   const fill = simulateFill(
     {
       symbol,
-      exchange: exchangeFor(symbol),
+      exchange: exch,
       instrument_type: optionType,
       option_type: optionType,
-      strike_price: pick.strike,
-      expiry_date: pick.expiry,
+      strike_price: strike,
+      expiry_date: expiry,
       lot_size: lotSize,
       order_type: "MARKET",
       trade_type: "BUY",
@@ -175,15 +238,24 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
       trigger_price: null,
       notes: null,
     },
-    pick.premium
+    premium
   );
   if (!fill) return { executed: false, detail: "fill simulation returned null" };
 
-  // Premium-points bracket off the actual entry. GTT (runGttOnce) auto-exits when
-  // the live premium crosses either. Stop floored at 0.05 so a sub-N-point premium
-  // still gets a valid (near-worthless) trigger rather than an impossible one.
-  const target = round2(fill.executed_price + TV_WEBHOOK_CONFIG.engineTargetPoints);
-  const stopLoss = round2(Math.max(0.05, fill.executed_price - TV_WEBHOOK_CONFIG.engineStopPoints));
+  // Resolve the bracket: absolute values win; else points off the fill.
+  const target =
+    params.target != null
+      ? round2(params.target)
+      : params.targetPoints != null
+        ? round2(fill.executed_price + params.targetPoints)
+        : null;
+  const stopLoss =
+    params.stopLoss != null
+      ? round2(Math.max(0.05, params.stopLoss))
+      : params.stopPoints != null
+        ? round2(Math.max(0.05, fill.executed_price - params.stopPoints))
+        : null;
+  const trailAmount = params.trailAmount != null && params.trailAmount > 0 ? round2(params.trailAmount) : null;
 
   const cost = round2(fill.executed_price * quantity + fill.total_charges);
   const balance = await getBalance(admin, userId);
@@ -201,12 +273,12 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
     .insert({
       user_id: userId,
       symbol,
-      exchange: exchangeFor(symbol),
+      exchange: exch,
       instrument_type: optionType,
       company_name: null,
       option_type: optionType,
-      strike_price: pick.strike,
-      expiry_date: pick.expiry,
+      strike_price: strike,
+      expiry_date: expiry,
       lot_size: lotSize,
       order_type: "MARKET",
       trade_type: "BUY",
@@ -217,13 +289,13 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
       executed_price: fill.executed_price,
       executed_quantity: quantity,
       executed_at: now,
-      simulated_bid: round2(pick.premium * 0.999),
-      simulated_ask: round2(pick.premium * 1.001),
+      simulated_bid: round2(premium * 0.999),
+      simulated_ask: round2(premium * 1.001),
       slippage: fill.slippage,
       brokerage: fill.brokerage,
       strategy_id: null,
-      strategy_name: p.strategy,
-      notes: `TradingView: ${p.strategy}`,
+      strategy_name: params.strategy,
+      notes: params.note ?? `Auto: ${params.strategy}`,
       tags: null,
       updated_at: now,
     } as never)
@@ -239,12 +311,12 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
     .insert({
       user_id: userId,
       symbol,
-      exchange: exchangeFor(symbol),
+      exchange: exch,
       instrument_type: optionType,
       company_name: null,
       option_type: optionType,
-      strike_price: pick.strike,
-      expiry_date: pick.expiry,
+      strike_price: strike,
+      expiry_date: expiry,
       lot_size: lotSize,
       direction: "LONG",
       quantity,
@@ -259,6 +331,9 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
       status: "OPEN",
       stop_loss: stopLoss,
       target,
+      trail_amount: trailAmount,
+      be_activation: params.beActivation != null && params.beActivation > 0 ? round2(params.beActivation) : null,
+      be_offset: params.beActivation != null && params.beActivation > 0 ? round2(params.beOffset ?? 0) : null,
       opened_at: now,
       updated_at: now,
     } as never)
@@ -291,14 +366,14 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
   // Record the link so the exit signal can close this exact contract.
   const { error: linkErr } = await admin.from("tv_engine_positions").upsert(
     {
-      strategy: p.strategy,
+      strategy: params.strategy,
       symbol,
       user_id: userId,
       position_id: position.id,
       instrument_type: optionType,
       option_type: optionType,
-      strike_price: pick.strike,
-      expiry_date: pick.expiry,
+      strike_price: strike,
+      expiry_date: expiry,
       lot_size: lotSize,
       qty: quantity,
       opened_at: now,
@@ -306,21 +381,21 @@ async function openOptionPosition(admin: Admin, userId: string, p: EntryPayload)
     { onConflict: "strategy,symbol" }
   );
   if (linkErr) {
-    // Position stands; only the auto-close link is missing. Surface it loudly.
-    console.warn(`[tv-engine] link write failed for ${p.strategy}/${symbol}:`, linkErr.message);
+    console.warn(`[tv-engine] link write failed for ${params.strategy}/${symbol}:`, linkErr.message);
   }
 
-  const strikeNote = pick.byDelta ? `~${TV_WEBHOOK_CONFIG.engineTargetDelta}Δ` : "ATM";
+  const note = params.strikeNote ? ` (${params.strikeNote})` : "";
+  const brk = `→ tgt ${target != null ? `₹${target}` : "—"} / sl ${stopLoss != null ? `₹${stopLoss}` : "—"}`;
   return {
     executed: true,
-    detail: `BUY ${quantity} ${symbol} ${pick.strike}${optionType} (${strikeNote}) @ ₹${fill.executed_price} → tgt ₹${target} / sl ₹${stopLoss} (${pick.source})`,
+    detail: `BUY ${quantity} ${symbol} ${strike}${optionType}${note} @ ₹${fill.executed_price} ${brk} (${source})`,
     orderId: order.id,
     positionId: position.id,
   };
 }
 
 // --- Close: SELL the linked option to close the LONG position ---
-async function closeLinkedPosition(
+export async function closeLinkedPosition(
   admin: Admin,
   userId: string,
   strategy: string,

@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run lint` — Run ESLint (flat config, Next.js core-web-vitals + TypeScript)
 - `npm test` — Run Vitest once (`vitest run`); `npm run test:watch` for watch mode
 - `npm run ws:upstox` — Run the standalone Upstox WebSocket market-data feed script (`scripts/upstox-ws.mjs`, loads `.env.local`)
+- `npm run nse:deals` — Run the standalone NSE large-deals snapshot writer (`scripts/nse-largedeals.mjs`, loads `.env.local`); fetches NSE bulk/block/short deals and upserts the shared `large_deals` table. Run from a machine where NSE is reachable (NSE blocks datacenter IPs), scheduled ~10-min during market hours.
 - `npm run tv:test` — Send a test TradingView webhook payload (`scripts/tv-webhook-test.mjs`)
 
 Vitest (`vitest.config.ts`, `node` environment, `@` alias) tests **pure logic only** — it has no Next/React/DOM env. Test files are colocated as `*.test.ts` (currently `src/lib/tv/engine.test.ts`, `src/lib/tv/stats.test.ts`, `src/lib/tv/schema.test.ts`, `src/lib/tv/notify.test.ts`, `src/lib/portfolio/summary.test.ts`). Run a single file with `npx vitest run src/lib/tv/engine.test.ts`. Full verification is `npm test` + `npm run lint` + `npm run build`. Do **not** write DOM/component tests against this config — keep logic pure and testable, and put side-effecting DB/env code in the processor/service layers.
@@ -136,6 +137,17 @@ Live pages under `src/app/dashboard/`: `page.tsx` (overview), `trade` (options s
 ### Options Market-Data Helpers (`src/lib/market-data/`)
 
 Beyond the provider aggregator, derivatives helpers back the trade simulator and the webhook engine: `expiries.ts` (`getExpiries`), `option-chain.ts` (`fetchOptionChain`, live-vs-mock tagged), `iv-history.ts`, `instruments.ts` / `upstox-instruments.ts` (symbol ↔ instrument-key resolution). Server-side only.
+
+### Automatic Trade Taker (`/dashboard/auto` + config-driven webhook execution)
+
+Builds on the TradingView webhook to turn incoming signals into **configurable** automatic paper option-trades. **Paper trading only — no broker client on this path.** It sits alongside (never replaces) the tv_* ledger and the legacy env engine.
+
+- **Pure, unit-tested logic** in `src/lib/auto/` (no DB/env/clock): `config.ts` (`DEFAULT_AUTO_CONFIG`, `mergeConfig`, `validateConfig`), `strike.ts` (ATM/ITM/OTM/Offset/Delta selection — delta uses real chain greeks and never invents a delta, side-aware ITM/OTM), `targets.ts` (%/points/price/RR + trailing), `quantity.ts` (lots/fixed/risk, real lot size), `risk.ts` (daily limits + open-position action), `session.ts` (market-window gate), `pipeline.ts` (`planEntry` → a `Decision` with a full audit trail). Colocated `*.test.ts` cover all of it — keep new auto math here.
+- **Server bridge** `src/services/auto-trade.server.ts`: `runAutoTrade` loads the account's `trading_configs` row, evaluates via `planEntry`, and (when AUTOMATIC + all gates pass) executes through the shared `placeOptionBuyToOpen` helper extracted in `trade-engine.server.ts` (reused by the legacy env engine too). Returns `{handled:false}` when no config row exists so the webhook **falls back to the legacy env engine** — existing deployments are unchanged. Writes an `auto_trade_decisions` audit row per signal.
+- **Modes** (`config.mode`): MANUAL (record only), SEMI (PROPOSED — approve/reject in the Signals decision modal), AUTOMATIC (execute). Plus a global `enabled` safety toggle, `dryRun`, and an `emergency_stopped` STOP/RESUME override. Exits and target/SL/trailing/breakeven are monitored by the existing `runGttOnce` GTT pass (breakeven added via `positions.be_activation`/`be_offset`).
+- **Idempotency/concurrency** (spec-mandated): a partial unique index on `auto_trade_decisions(user_id, dedupe_key)` reserves each signal — a duplicate/concurrent identical webhook loses the race and is recorded DUPLICATE, never double-traded.
+- **DB** (`20260821000000_auto_trading.sql`): `trading_configs` (active per-user config JSON + version + emergency flag), `trading_config_versions` (audit history — a decision references the version active at execution), `auto_trade_decisions` (per-signal decision + audit trail + links to `orders`/`positions`). All own-row RLS; the webhook writes via the service-role client.
+- **API** (`src/app/api/trading/*`): `config` (GET/PUT, versioned), `auto` (emergency stop/resume), `status` (automation counters), `test-signal` (dry-run/execute preview), `decision` (semi-auto approve/reject). Config/copy in `src/config/autoTrade.ts`; client fetchers in `src/services/auto-trade.service.ts`; types in `src/types/autoTrade.ts`; UI in `src/components/auto/` + `/dashboard/auto` and the enhanced `/dashboard/signals` decisions table.
 
 ### Market Intelligence Dashboard (`/dashboard/intel`)
 

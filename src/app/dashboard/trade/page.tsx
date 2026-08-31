@@ -118,6 +118,9 @@ export default function TradePage() {
   const [chainsByExpiry, setChainsByExpiry] = useState<Record<string, OptionChainData[]>>({});
   const [chainLoading, setChainLoading] = useState(false);
   const [atmStrike, setAtmStrike] = useState(0);
+  // Live F&O lot size for the selected underlying (from the option-chain feed's
+  // instrument master); seeded per symbol and corrected when the chain loads.
+  const [optionLotSize, setOptionLotSize] = useState(1);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
   const [selectedOptionLtp, setSelectedOptionLtp] = useState<number | null>(null);
   const [selectedSide, setSelectedSide] = useState<"CE" | "PE">("CE");
@@ -231,6 +234,7 @@ export default function TradePage() {
           ? d.atmStrike
           : calcAtm(underlying, selectedSymbol);
         setAtmStrike(atm);
+        if (typeof d.lotSize === "number" && d.lotSize > 0) setOptionLotSize(d.lotSize);
         setFullChain(incoming);
         if (selectedExpiry) setChainsByExpiry((prev) => ({ ...prev, [selectedExpiry]: incoming }));
         // Smart default: preselect the ATM strike when nothing is chosen yet.
@@ -297,6 +301,7 @@ export default function TradePage() {
     setSlPrice(""); setTargetPrice(""); setRiskAmount(""); setTradeMode("single");
     setConfirmStep(false); setOrderSuccess(null); setQuote(null);
     setSelectedStrike(null); setSelectedOptionLtp(null); setSelectedSide(side); setFlashStrike(null);
+    setOptionLotSize(TRADE_CONFIG.defaultLotSizes[symbol] ?? 1);
     setStrikeRange(TRADE_CONFIG.strikeWindow.initial); setMoneyFilter("all");
     setChainsByExpiry({}); // drop cached chains from the previous underlying
     setModalOpen(true); fetchQuote(symbol, exchange);
@@ -500,8 +505,10 @@ export default function TradePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const lotSize = TRADE_CONFIG.defaultLotSizes[selectedSymbol] ?? 1;
   const isOption = instrumentType !== "EQ";
+  // Options trade in fixed lots (per-underlying, from the live instrument master);
+  // equity trades share-for-share, so its "lot" is always 1.
+  const lotSize = isOption ? optionLotSize : 1;
   // Streamed LTP for the selected contract (when the WS feed is covering it),
   // so the ticket's current premium and the simulated fill tick live too.
   const liveSelectedLtp = useMemo(() => {

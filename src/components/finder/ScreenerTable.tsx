@@ -16,6 +16,8 @@ interface ScreenerTableProps {
   setConfig: (patch: Partial<FinderConfigState>) => void;
   /** Symbols with an NSE bulk/block deal today — cross-tagged in the table. */
   dealSymbols?: Set<string>;
+  /** Symbols flagged with unusual (accelerating) volume → ratio, cross-tagged. */
+  surges?: Map<string, number>;
 }
 
 const CONVICTION_STYLE: Record<ConvictionLabel, string> = {
@@ -54,7 +56,7 @@ function RangeGauge({ pos }: { pos: number | null }) {
   );
 }
 
-export default function ScreenerTable({ rows, config, setConfig, dealSymbols }: ScreenerTableProps) {
+export default function ScreenerTable({ rows, config, setConfig, dealSymbols, surges }: ScreenerTableProps) {
   const router = useRouter();
 
   // Deep-link to the Trade ticket with this stock's option chain open. Every
@@ -110,6 +112,7 @@ export default function ScreenerTable({ rows, config, setConfig, dealSymbols }: 
         <tbody>
           {rows.map((r) => {
             const sig = deriveRowSignals(r);
+            const surgeRatio = surges?.get(r.symbol);
             return (
               <tr
                 key={r.symbol}
@@ -133,6 +136,14 @@ export default function ScreenerTable({ rows, config, setConfig, dealSymbols }: 
                       className="ml-2 rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300"
                     >
                       {FINDER_CONFIG.largeDeals.dealTagLabel}
+                    </span>
+                  )}
+                  {surgeRatio != null && (
+                    <span
+                      title={`${FINDER_CONFIG.volume.badgeHint} (${surgeRatio.toFixed(1)}× session pace)`}
+                      className="ml-2 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300"
+                    >
+                      ⚡ {FINDER_CONFIG.volume.badgeLabel}
                     </span>
                   )}
                 </td>
