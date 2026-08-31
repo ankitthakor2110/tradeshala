@@ -23,6 +23,7 @@ import { computeAllStats, equityCurve, COMBINED_KEY } from "@/lib/tv/stats";
 import { showToast } from "@/components/ui/Toast";
 import Skeleton from "@/components/ui/Skeleton";
 import ButtonLoader from "@/components/ui/ButtonLoader";
+import DecisionsSection from "@/components/auto/DecisionsSection";
 import type { TvPosition, TvTrade, EngineOpenPosition, EngineTrade } from "@/types/tradingview";
 
 const C = TV_DASHBOARD_COPY;
@@ -193,6 +194,9 @@ export default function SignalsPage() {
         <span aria-hidden>⚠</span>
         <p>{C.disclaimer}</p>
       </div>
+
+      {/* AUTOMATIC TRADE TAKER — live status + per-signal decisions/audit */}
+      <DecisionsSection />
 
       {/* AUTOMATED ENGINE TRADES — the real option paper-trades + their exits */}
       <EngineTradesSection open={engineOpen} closed={engineClosed} loading={engineLoading} />

@@ -19,6 +19,7 @@ import { usePositions } from "@/hooks/usePositions";
 import { getVirtualCash } from "@/services/portfolio.service";
 import IndexCard, { IndexCardSkeleton } from "@/components/dashboard/IndexCard";
 import LiveBadge from "@/components/ui/LiveBadge";
+import AutoTradingDashboardCard from "@/components/auto/AutoTradingDashboardCard";
 import type { DashboardStats, IndexData, StockGainerLoser } from "@/types/database";
 
 type MarketPhase = "open" | "preopen" | "closed";
@@ -272,6 +273,9 @@ function DashboardContent() {
         source={liveBadgeSource}
         lastUpdated={lastUpdated}
       />
+
+      {/* Auto trading snapshot (only when configured) */}
+      <AutoTradingDashboardCard />
 
       {/* Index cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

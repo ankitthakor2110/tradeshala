@@ -276,6 +276,10 @@ export interface Position {
   // Server-side trailing-stop ratchet (peak for long, trough for short).
   trail_peak: number | null;
   targets: { price: number; qty: number }[] | null;
+  // Breakeven: raise stop to average_price + be_offset once profit reaches
+  // be_activation premium-points. Nullable → no breakeven.
+  be_activation: number | null;
+  be_offset: number | null;
   opened_at: string;
   closed_at: string | null;
   updated_at: string;

@@ -1,0 +1,198 @@
+// Config-driven copy + option lists for the Trading Configuration page and the
+// Signals automation UI. All user-visible strings live here (config-driven UI
+// pattern); components render data only. No env reads — safe to import anywhere.
+
+export const AUTO_TRADE_COPY = {
+  page: {
+    title: "Trading Configuration",
+    subtitle: "Control how incoming signals become automatic paper trades",
+    navLabel: "Auto Trading",
+  },
+
+  disclaimer:
+    "Paper trading only — no real broker order is ever placed. Automatic trading can open and close paper positions on its own; keep the status obvious and use Stop Auto Trading whenever unsure.",
+
+  status: {
+    activeLabel: "AUTO TRADING ACTIVE",
+    offLabel: "AUTO TRADING OFF",
+    stoppedLabel: "EMERGENCY STOPPED",
+    stopButton: "STOP AUTO TRADING",
+    resumeButton: "Resume Automatic Trading",
+    stopConfirm: "Stop automatic trading now? Existing positions are left open.",
+    resumeConfirm: "Resume automatic trading?",
+  },
+
+  sections: {
+    tradingStatus: "Trading Status",
+    instrument: "Instrument",
+    expiry: "Expiry",
+    strike: "Strike Selection",
+    entry: "Entry",
+    quantity: "Quantity",
+    target: "Target",
+    stopLoss: "Stop Loss",
+    risk: "Risk Management",
+    limits: "Daily Limits & Positions",
+    session: "Market Session",
+    test: "Test Signal & Dry Run",
+  },
+
+  buttons: {
+    save: "Save Configuration",
+    saving: "Saving…",
+    runTest: "Preview (Dry Run)",
+    runTestExec: "Execute Test Trade",
+  },
+
+  // Select option lists — label/value pairs rendered by the page.
+  options: {
+    mode: [
+      { value: "MANUAL", label: "Manual" },
+      { value: "SEMI", label: "Semi-Automatic" },
+      { value: "AUTOMATIC", label: "Automatic" },
+    ],
+    product: [
+      { value: "OPTIONS", label: "Options" },
+      { value: "FUTURES", label: "Futures" },
+      { value: "EQUITY", label: "Equity" },
+    ],
+    optionType: [
+      { value: "FOLLOW_SIGNAL", label: "Follow Signal" },
+      { value: "CE", label: "CE (Call)" },
+      { value: "PE", label: "PE (Put)" },
+    ],
+    expiry: [
+      { value: "NEAREST", label: "Nearest Expiry" },
+      { value: "CURRENT", label: "Current Expiry" },
+      { value: "NEXT", label: "Next Expiry" },
+      { value: "WEEKLY", label: "Weekly" },
+      { value: "MONTHLY", label: "Monthly" },
+      { value: "SPECIFIC", label: "Specific Expiry" },
+    ],
+    strikeMethod: [
+      { value: "ATM", label: "ATM" },
+      { value: "ITM", label: "ITM" },
+      { value: "OTM", label: "OTM" },
+      { value: "OFFSET", label: "Strike Offset" },
+      { value: "DELTA", label: "Delta Based" },
+    ],
+    fallback: [
+      { value: "SKIP", label: "Skip Trade" },
+      { value: "CLOSEST", label: "Use Closest Strike" },
+    ],
+    entry: [
+      { value: "MARKET", label: "Market Price" },
+      { value: "LTP", label: "LTP" },
+      { value: "ASK", label: "Ask Price" },
+      { value: "BID", label: "Bid Price" },
+      { value: "SIGNAL", label: "Signal Price" },
+      { value: "CUSTOM", label: "Custom" },
+    ],
+    quantityMode: [
+      { value: "LOTS", label: "Lots" },
+      { value: "FIXED", label: "Fixed Quantity" },
+      { value: "RISK", label: "Risk Based" },
+    ],
+    targetType: [
+      { value: "PERCENTAGE", label: "Percentage" },
+      { value: "POINTS", label: "Points" },
+      { value: "PRICE", label: "Price" },
+      { value: "RR", label: "Risk / Reward" },
+    ],
+    stopLossType: [
+      { value: "PERCENTAGE", label: "Percentage" },
+      { value: "POINTS", label: "Points" },
+      { value: "PRICE", label: "Price" },
+    ],
+    trailType: [
+      { value: "POINTS", label: "Points" },
+      { value: "PERCENTAGE", label: "Percentage" },
+    ],
+    existingPosition: [
+      { value: "IGNORE", label: "Ignore Signal" },
+      { value: "ADD", label: "Allow Additional Position" },
+      { value: "REVERSE", label: "Close Existing + Reverse" },
+    ],
+  },
+
+  labels: {
+    enable: "Enable Automatic Trading",
+    mode: "Trading Mode",
+    dryRun: "Dry Run (compute but never execute)",
+    product: "Product",
+    optionType: "Option Type",
+    allowedUnderlyings: "Underlyings (comma-separated, blank = follow signal)",
+    expiry: "Expiry",
+    specificExpiry: "Specific Expiry (YYYY-MM-DD)",
+    strikeMethod: "Method",
+    targetDelta: "Target Delta",
+    maxDeltaDiff: "Maximum Delta Difference",
+    fallback: "If no matching strike",
+    offset: "ATM Offset (steps)",
+    itmOtmSteps: "Steps",
+    entryType: "Entry Price",
+    customPrice: "Custom Price",
+    quantityMode: "Quantity Mode",
+    lots: "Lots",
+    fixedQty: "Quantity",
+    riskAmount: "Risk Amount (₹)",
+    targetType: "Target Type",
+    targetValue: "Target",
+    slType: "SL Type",
+    slValue: "Stop Loss",
+    rrEnabled: "Use Risk / Reward for target",
+    rrRisk: "Risk",
+    rrReward: "Reward",
+    trailEnabled: "Enable Trailing Stop Loss",
+    trailType: "Trailing Type",
+    trailValue: "Trail Amount",
+    trailActivation: "Activation",
+    beEnabled: "Enable Breakeven",
+    beActivation: "Move SL to Breakeven After",
+    beOffset: "Breakeven Offset",
+    maxTrades: "Maximum Trades Per Day",
+    maxDailyLoss: "Maximum Daily Loss (₹)",
+    maxConsecutive: "Maximum Consecutive Losses",
+    maxOpen: "Maximum Open Positions",
+    existingPosition: "If position already exists",
+    duplicate: "Duplicate Signal Protection",
+    sessionEnforce: "Restrict to Market Session",
+    sessionStart: "Start (HH:MM)",
+    sessionEnd: "End (HH:MM)",
+  },
+
+  statusCard: {
+    title: "Auto Trading",
+    todaysTrades: "Today's Trades",
+    todaysPnl: "Today's P&L",
+    openPositions: "Open Positions",
+    consecutiveLosses: "Consecutive Losses",
+    dailyLossRemaining: "Daily Loss Limit",
+    remaining: "remaining",
+  },
+
+  decisions: {
+    title: "Automation Decisions",
+    subtitle: "Every signal the auto-trader evaluated, with the exact decision and reason.",
+    empty: "No signals evaluated yet.",
+    detailTitle: "Signal Details",
+    rawTitle: "Original Signal",
+    normalizedTitle: "Normalized Signal",
+    decisionTitle: "Trade Decision",
+    auditTitle: "Audit Trail",
+    approve: "Approve",
+    reject: "Reject",
+  },
+
+  statusStyles: {
+    EXECUTED: "bg-green-500/10 text-green-400 border-green-500/20",
+    PROPOSED: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+    DRY_RUN: "bg-sky-500/10 text-sky-400 border-sky-500/20",
+    SKIPPED: "bg-gray-700/40 text-gray-300 border-gray-600/30",
+    REJECTED: "bg-red-500/10 text-red-400 border-red-500/20",
+    FAILED: "bg-red-500/10 text-red-400 border-red-500/20",
+    DUPLICATE: "bg-gray-700/40 text-gray-400 border-gray-600/30",
+    CANCELLED: "bg-gray-700/40 text-gray-400 border-gray-600/30",
+    PROCESSING: "bg-gray-700/40 text-gray-400 border-gray-600/30",
+  } as Record<string, string>,
+} as const;

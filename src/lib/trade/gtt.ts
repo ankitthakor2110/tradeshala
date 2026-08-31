@@ -157,6 +157,23 @@ export async function runGttOnce(admin: Admin): Promise<number> {
 
       const isShort = p.direction === "SHORT";
 
+      // Breakeven: once profit reaches be_activation points, raise the stop to
+      // average_price + be_offset (once). Cleared after firing so it moves once.
+      if (p.be_activation != null && p.be_activation > 0) {
+        const offset = p.be_offset ?? 0;
+        const reached = isShort
+          ? ltp <= p.average_price - p.be_activation
+          : ltp >= p.average_price + p.be_activation;
+        if (reached) {
+          const newStop = round2(isShort ? p.average_price - offset : p.average_price + offset);
+          await admin
+            .from("positions")
+            .update({ stop_loss: newStop, be_activation: null, be_offset: null } as never)
+            .eq("id", p.id);
+          p.stop_loss = newStop; // use the moved stop in the checks below this pass
+        }
+      }
+
       // SL / target (one close ends this position).
       const hitSL = p.stop_loss != null && (isShort ? ltp >= p.stop_loss : ltp <= p.stop_loss);
       const hitTarget = p.target != null && (isShort ? ltp <= p.target : ltp >= p.target);
