@@ -1,0 +1,229 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=5
+indicator("Ankit Scalping Indication - HL Based", shorttitle="ASI HL", overlay=true)
+
+// ==========================================
+// --- INPUTS: ZERO LAG TREND (RULE 1) ---
+// ==========================================
+grp1 = "1. Zero Lag Trend Settings"
+src        = input.source(hl2, "Source", group=grp1) // Changed from close to hl2
+length     = input.int(30, "Trend Length", tooltip="Look-Back window for Zero-Lag EMA", group=grp1)
+mult       = input.float(0.4, "Band Multiplier", tooltip="Controls thickness of bands", group=grp1)
+colorBull  = input.color(#00ffbb, "Bullish Trend Color", group=grp1)
+colorBear  = input.color(#ff1100, "Bearish Trend Color", group=grp1)
+
+// ==========================================
+// --- INPUTS: ZERO LAG MACD (RULES 2 & 3) ---
+// ==========================================
+grp2 = "2. Zero Lag MACD Settings"
+fastLength    = input.int(10, title="Fast MM period", minval=1, group=grp2)
+slowLength    = input.int(24, title="Slow MM period", minval=1, group=grp2)
+signalLength  = input.int(7, title="Signal MM period", minval=1, group=grp2)
+macdEmaLength = input.int(7, title="MACD EMA period", minval=1, group=grp2)
+useEma        = input.bool(true, title="Use EMA (otherwise SMA)", group=grp2)
+useOldAlgo    = input.bool(false, title="Use Glaz algo", group=grp2)
+
+// ==========================================
+// --- INPUTS: RISK MANAGEMENT (TP & SL) ---
+// ==========================================
+grp4 = "3. Risk Management"
+tpPoints = input.float(20.0, title="Take Profit (Points)", group=grp4)
+slPoints = input.float(10.0, title="Stop Loss (Points)", group=grp4)
+
+// ==========================================
+// --- INPUTS: ⑬ WEBHOOK JSON ALERTS  →  TradeShala paper-trading ledger ---
+// ==========================================
+//  Native entry/exit dialect: an "exit" event closes the ledger position, an
+//  "entry" opens the next one. The ledger (/api/webhook/tradingview) validates
+//  this exact shape and processes it as before — no page changes required.
+//
+//  SETUP: add ONE alert on this indicator → condition "Any alert() function call"
+//  → Webhook URL = your TradeShala endpoint with ?secret=YOUR_SECRET appended.
+//  Fires on bar close only.
+//
+//  NOTE ON sl / tp: these are INDEX levels (not option premium). The ledger
+//  infers the exit reason (TP/SL/manual) by comparing the exit price to these.
+//
+//  JSON FORMATTING RULE: any numeric field that can be < 1 in absolute value MUST
+//  use a leading-zero format ("0.##"), never "#.##" — Pine's '#' is an OPTIONAL
+//  digit and drops the integer 0, producing ".60", which is INVALID JSON and gets
+//  the whole alert rejected. Prices/SL/TP are in the thousands so "#.##" is safe.
+grpW = "4. Webhook Alerts"
+whOn     = input.bool  (true, "Emit webhook JSON alerts", group=grpW)
+whStrat  = input.string("ASI-HL-Based", "Strategy name (ledger key)", group=grpW)
+whSymOvr = input.string("", "Symbol override (blank = chart ticker)", group=grpW)
+whQty    = input.int   (1, "Qty in payload", minval=1, group=grpW)
+whSecret = input.string("", "Secret in body (blank = pass ?secret= in the URL)", group=grpW)
+
+// ==========================================
+// --- CALCS: ZERO LAG TREND (RULE 1) ---
+// ==========================================
+lag = math.floor((length - 1) / 2)
+zlema_trend = ta.ema(src + (src - src[lag]), length)
+volatility = ta.highest(ta.atr(length), length * 3) * mult
+
+var trend = 0
+// Trend flips now evaluated on High and Low explicitly
+if ta.crossover(high, zlema_trend + volatility)
+    trend := 1
+if ta.crossunder(low, zlema_trend - volatility)
+    trend := -1
+
+// ==========================================
+// --- CALCS: ZERO LAG MACD (RULES 2 & 3) ---
+// ==========================================
+ma1 = useEma ? ta.ema(src, fastLength) : ta.sma(src, fastLength)
+ma2 = useEma ? ta.ema(ma1, fastLength) : ta.sma(ma1, fastLength)
+zerolagEMA = ((2 * ma1) - ma2)
+
+mas1 = useEma ? ta.ema(src, slowLength) : ta.sma(src, slowLength)
+mas2 = useEma ? ta.ema(mas1, slowLength) : ta.sma(mas1, slowLength)
+zerolagslowMA = ((2 * mas1) - mas2)
+
+ZeroLagMACD = zerolagEMA - zerolagslowMA
+emasig1     = ta.ema(ZeroLagMACD, signalLength)
+emasig2     = ta.ema(emasig1, signalLength)
+macdSignal  = useOldAlgo ? ta.sma(ZeroLagMACD, signalLength) : ((2 * emasig1) - emasig2)
+macdEma     = ta.ema(ZeroLagMACD, macdEmaLength)
+
+// ==========================================
+// --- DYNAMIC STATE & RISK TRACKER ---
+// ==========================================
+var int active_trade = 0 // 1 = CE, -1 = PE, 0 = Flat
+var float entry_price = na
+
+// --- Webhook exit capture ---
+// Record the exit FILL price + reason while entry_price is still valid (the exit
+// blocks below null it). Read once at the emit section at the end of the script.
+float  wh_exit_price  = na
+string wh_exit_reason = na
+bool   wh_fire_exit   = false
+
+// --- EXITS (Invalidation + TP/SL) ---
+// CE Exits
+ce_dyn_exit = (active_trade == 1) and (trend == -1 or ZeroLagMACD <= macdSignal or macdSignal <= macdEma)
+ce_tp_hit   = (active_trade == 1) and (high >= entry_price + tpPoints)
+ce_sl_hit   = (active_trade == 1) and (low <= entry_price - slPoints)
+ce_exit     = ce_dyn_exit or ce_tp_hit or ce_sl_hit
+
+if ce_exit
+    // TP/SL take precedence over the dynamic (SIGNAL) exit, mirroring the plotted shapes.
+    wh_exit_price  := ce_tp_hit ? entry_price + tpPoints : ce_sl_hit ? entry_price - slPoints : close
+    wh_exit_reason := ce_tp_hit ? "TP" : ce_sl_hit ? "SL" : "SIGNAL"
+    wh_fire_exit   := true
+    active_trade := 0
+    entry_price := na
+
+// PE Exits
+pe_dyn_exit = (active_trade == -1) and (trend == 1 or ZeroLagMACD >= macdSignal or macdSignal >= macdEma)
+pe_tp_hit   = (active_trade == -1) and (low <= entry_price - tpPoints)
+pe_sl_hit   = (active_trade == -1) and (high >= entry_price + slPoints)
+pe_exit     = pe_dyn_exit or pe_tp_hit or pe_sl_hit
+
+if pe_exit
+    // PE is short/PUT: profit as the index falls, so the TP level sits BELOW entry.
+    wh_exit_price  := pe_tp_hit ? entry_price - tpPoints : pe_sl_hit ? entry_price + slPoints : close
+    wh_exit_reason := pe_tp_hit ? "TP" : pe_sl_hit ? "SL" : "SIGNAL"
+    wh_fire_exit   := true
+    active_trade := 0
+    entry_price := na
+
+// --- ANY ORDER ENTRIES ---
+// CE Logic
+ce_state = (trend == 1) and (ZeroLagMACD >= macdSignal) and (ZeroLagMACD >= macdEma) and (macdSignal >= macdEma)
+ce_signal = ce_state and not ce_state[1] and active_trade != 1
+
+if ce_signal
+    active_trade := 1
+    entry_price := hl2 // Entry price recorded at the bar's median instead of close
+
+// PE Logic
+pe_state = (trend == -1) and (ZeroLagMACD <= macdSignal) and (ZeroLagMACD <= macdEma) and (macdSignal <= macdEma)
+pe_signal = pe_state and not pe_state[1] and active_trade != -1
+
+if pe_signal
+    active_trade := -1
+    entry_price := hl2 // Entry price recorded at the bar's median instead of close
+
+// ==========================================
+// --- PLOTTING ---
+// ==========================================
+zlemaColor = trend == 1 ? color.new(colorBull, 70) : color.new(colorBear, 70)
+m = plot(zlema_trend, title="Zero Lag Basis", linewidth=2, color=zlemaColor)
+
+upper = plot(trend == -1 ? zlema_trend + volatility : na, style=plot.style_linebr, color=color.new(colorBear, 90), title="Upper Deviation Band")
+lower = plot(trend == 1 ? zlema_trend - volatility : na, style=plot.style_linebr, color=color.new(colorBull, 90), title="Lower Deviation Band")
+
+// Gradient shading now uses hl2 instead of (open + close) / 2
+fill(m, upper, hl2, zlema_trend + volatility, color.new(colorBear, 90), color.new(colorBear, 70))
+fill(m, lower, hl2, zlema_trend - volatility, color.new(colorBull, 90), color.new(colorBull, 70))
+
+// Entry Signals
+plotshape(ce_signal ? zlema_trend - volatility * 1.5 : na, "CE Trigger", shape.labelup, location.absolute, color.new(color.green, 0), text="CE", textcolor=color.white, size=size.small)
+plotshape(pe_signal ? zlema_trend + volatility * 1.5 : na, "PE Trigger", shape.labeldown, location.absolute, color.new(color.red, 0), text="PE", textcolor=color.white, size=size.small)
+
+// CE Exit Shapes
+plotshape(ce_tp_hit and not ce_dyn_exit ? zlema_trend + volatility * 1.5 : na, "CE TP", shape.xcross, location.absolute, color.new(color.green, 0), text="TP", textcolor=color.green, size=size.small)
+plotshape(ce_sl_hit and not ce_tp_hit and not ce_dyn_exit ? zlema_trend + volatility * 1.5 : na, "CE SL", shape.xcross, location.absolute, color.new(color.red, 0), text="SL", textcolor=color.red, size=size.small)
+plotshape(ce_dyn_exit and not ce_tp_hit and not ce_sl_hit ? zlema_trend + volatility * 1.5 : na, "CE Exit", shape.xcross, location.absolute, color.new(color.red, 0), size=size.small)
+
+// PE Exit Shapes
+plotshape(pe_tp_hit and not pe_dyn_exit ? zlema_trend - volatility * 1.5 : na, "PE TP", shape.xcross, location.absolute, color.new(color.green, 0), text="TP", textcolor=color.green, size=size.small)
+plotshape(pe_sl_hit and not pe_tp_hit and not pe_dyn_exit ? zlema_trend - volatility * 1.5 : na, "PE SL", shape.xcross, location.absolute, color.new(color.red, 0), text="SL", textcolor=color.red, size=size.small)
+plotshape(pe_dyn_exit and not pe_tp_hit and not pe_sl_hit ? zlema_trend - volatility * 1.5 : na, "PE Exit", shape.xcross, location.absolute, color.new(color.green, 0), size=size.small)
+
+// ==========================================
+// --- ALERTS (legacy plain-text) ---
+// ==========================================
+alertcondition(ce_signal, title="ASI CE Entry", message="CE Signal plotted on {{ticker}} at {{close}}")
+alertcondition(pe_signal, title="ASI PE Entry", message="PE Signal plotted on {{ticker}} at {{close}}")
+
+// ==========================================
+// --- ⑬ WEBHOOK JSON ALERTS  →  TradeShala paper-trading ledger ---
+// ==========================================
+// Canonical shape consumed by /api/webhook/tradingview (src/lib/tv/schema.ts):
+//   entry: {event,strategy,symbol,side,option_type,timeframe,price,sl,tp,qty,time,id}
+//   exit : {event,strategy,symbol,price,reason,qty,time,id}
+// CE -> side "long"  + option_type "CALL"  (sl below entry, tp above)
+// PE -> side "short" + option_type "PUT"   (sl above entry, tp below)
+whSym = whSymOvr == "" ? syminfo.ticker : whSymOvr
+
+f_secretField() =>
+    whSecret == "" ? "" : '"secret":"' + whSecret + '",'
+
+// seq lets the receiver order a same-bar exit-then-entry pair (HTTP order is not
+// guaranteed): exit=1, entry=2.
+f_entryJson(string sideStr, string optStr, float px, float slv, float tpv, string kind) =>
+    '{' + f_secretField() + '"event":"entry"'
+     + ',"seq":2'
+     + ',"strategy":"' + whStrat + '"'
+     + ',"symbol":"'   + whSym + '"'
+     + ',"side":"'     + sideStr + '"'
+     + ',"option_type":"' + optStr + '"'
+     + ',"timeframe":"' + timeframe.period + '"'
+     + ',"price":' + str.tostring(px,  "#.##")
+     + ',"sl":'    + str.tostring(slv, "#.##")
+     + ',"tp":'    + str.tostring(tpv, "#.##")
+     + ',"sl_points":' + str.tostring(slPoints, "0.##")
+     + ',"tp_points":' + str.tostring(tpPoints, "0.##")
+     + ',"qty":'   + str.tostring(whQty)
+     + ',"time":'  + str.tostring(time)
+     + ',"id":"'   + whStrat + '-' + kind + '-' + str.tostring(time) + '"}'
+
+f_exitJson(float px, string reason) =>
+    '{' + f_secretField() + '"event":"exit"'
+     + ',"seq":1'
+     + ',"strategy":"' + whStrat + '"'
+     + ',"symbol":"'   + whSym + '"'
+     + ',"reason":"'   + reason + '"'
+     + ',"price":' + str.tostring(px, "#.##")
+     + ',"qty":'   + str.tostring(whQty)
+     + ',"time":'  + str.tostring(time)
+     + ',"id":"'   + whStrat + '-EXIT-' + str.tostring(time) + '"}'
+
+if whOn and wh_fire_exit
+    alert(f_exitJson(wh_exit_price, wh_exit_reason), alert.freq_once_per_bar_close)
+if whOn and ce_signal
+    alert(f_entryJson("long",  "CALL", entry_price, entry_price - slPoints, entry_price + tpPoints, "CE"), alert.freq_once_per_bar_close)
+if whOn and pe_signal
+    alert(f_entryJson("short", "PUT",  entry_price, entry_price + slPoints, entry_price - tpPoints, "PE"), alert.freq_once_per_bar_close)

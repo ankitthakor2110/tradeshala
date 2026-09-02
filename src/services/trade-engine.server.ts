@@ -28,12 +28,35 @@ import { simulateFill } from "@/services/trade-engine.service";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+/** The concrete option contract an entry opened — what the trader should buy.
+ * Populated on a successful BUY-to-open so notifications (Telegram) can show the
+ * side, strike, live premium (LTP) and bracket without re-pricing the chain. */
+export interface OptionContractInfo {
+  symbol: string;
+  optionType: "CE" | "PE";
+  strike: number;
+  expiry: string;
+  /** Live option premium (chain LTP) — the "current price" of the contract. */
+  ltp: number;
+  /** Simulated fill price actually booked (LTP ± slippage). */
+  fillPrice: number;
+  quantity: number;
+  lots: number;
+  target: number | null;
+  stopLoss: number | null;
+  /** Short label for how the strike was chosen (e.g. "~0.6Δ", "ATM", "Δ 0.60"). */
+  strikeNote?: string;
+  source: string;
+}
+
 export interface EngineResult {
   executed: boolean;
   detail: string;
   orderId?: string;
   positionId?: string;
   realizedPnl?: number;
+  /** Set on a successful entry (BUY-to-open); absent on exits/failures. */
+  contract?: OptionContractInfo;
 }
 
 interface LinkRow {
@@ -391,6 +414,20 @@ export async function placeOptionBuyToOpen(
     detail: `BUY ${quantity} ${symbol} ${strike}${optionType}${note} @ ₹${fill.executed_price} ${brk} (${source})`,
     orderId: order.id,
     positionId: position.id,
+    contract: {
+      symbol,
+      optionType,
+      strike,
+      expiry,
+      ltp: round2(premium),
+      fillPrice: fill.executed_price,
+      quantity,
+      lots: Math.max(1, Math.round(quantity / lotSize)),
+      target,
+      stopLoss,
+      strikeNote: params.strikeNote,
+      source,
+    },
   };
 }
 

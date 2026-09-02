@@ -20,6 +20,7 @@ import {
   closeLinkedPosition,
   placeOptionBuyToOpen,
   type EngineResult,
+  type OptionContractInfo,
 } from "@/services/trade-engine.server";
 
 // ============================================================================
@@ -49,6 +50,8 @@ export interface RunResult {
   decisionId?: string;
   status?: Decision["status"];
   detail?: string;
+  /** The opened contract on an EXECUTED entry — for the Telegram alert. */
+  contract?: OptionContractInfo;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -543,7 +546,13 @@ export async function runAutoTrade(
       orderId: result.orderId,
       positionId: result.positionId,
     });
-    return { handled: true, decisionId: reservedId ?? undefined, status: decision.status, detail: result.detail };
+    return {
+      handled: true,
+      decisionId: reservedId ?? undefined,
+      status: decision.status,
+      detail: result.detail,
+      contract: result.contract,
+    };
   }
 
   // Non-executing outcomes (SKIPPED / PROPOSED / DRY_RUN / REJECTED / DUPLICATE).

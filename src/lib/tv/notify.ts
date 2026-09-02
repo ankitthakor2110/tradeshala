@@ -1,5 +1,6 @@
 import type { WebhookPayload } from "@/lib/tv/schema";
 import type { ApplyResult } from "@/lib/tv/processor";
+import type { OptionContractInfo } from "@/services/trade-engine.server";
 
 // ============================================================================
 // Telegram alerting for processed TradingView signals (server-only).
@@ -28,6 +29,36 @@ function fmtPrice(n: number): string {
   return Number.isFinite(n) ? n.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : String(n);
 }
 
+/** Expiry ISO (e.g. "2026-09-05") → "05 Sep"; "" if unparseable. */
+function fmtExpiry(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "UTC" });
+}
+
+/**
+ * Minimal entry message: just what to buy — side (CALL/PUT), the strike with its
+ * expiry, and the live premium (LTP). Used when the engine resolved a concrete
+ * contract for the signal (same strike-selection rules as the fill).
+ */
+function buildEntryText(
+  _payload: WebhookPayload,
+  applied: ApplyResult,
+  c: OptionContractInfo
+): string {
+  const kind = c.optionType === "CE" ? "CALL" : "PUT";
+  const head = applied.handled === "reversed" ? "🔄" : c.optionType === "CE" ? "🟢" : "🔴";
+  const expiry = fmtExpiry(c.expiry);
+
+  return [
+    "📢 <b>TradeShala Alert</b>",
+    "",
+    `${head} <b>BUY ${kind}</b>`,
+    `<b>${esc(c.symbol)} ${c.strike} ${c.optionType}</b>${expiry ? ` (${expiry})` : ""}`,
+    `LTP: <b>₹${fmtPrice(c.ltp)}</b>`,
+  ].join("\n");
+}
+
 /**
  * Build the HTML alert text for a processed signal. Pure (no I/O) so it's unit-
  * testable. `actionLabel` is the original BUY/SELL when the payload was broker-
@@ -36,8 +67,16 @@ function fmtPrice(n: number): string {
 export function buildAlertText(
   payload: WebhookPayload,
   applied: ApplyResult,
-  actionLabel: string
+  actionLabel: string,
+  contract?: OptionContractInfo
 ): string {
+  // When the engine resolved a concrete option contract for an entry, show the
+  // trader exactly what to buy (side + strike + LTP). Falls through to the plain
+  // message for exits, or when no contract was resolved (engine off / mock / fail).
+  if (contract && (applied.handled === "opened" || applied.handled === "reversed")) {
+    return buildEntryText(payload, applied, contract);
+  }
+
   const bullish = actionLabel === "BUY" || (payload.event === "entry" && payload.side === "long");
   const emoji = applied.handled === "reversed" ? "🔄" : bullish ? "🟢" : "🔴";
 
