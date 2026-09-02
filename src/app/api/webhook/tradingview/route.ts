@@ -4,6 +4,7 @@ import { TV_WEBHOOK_CONFIG } from "@/config/tradingview";
 import { validateWebhook, normalizeInbound, isActionPayload, parseLooseJson } from "@/lib/tv/schema";
 import { secretsMatch, ipAllowed, dedupeKey } from "@/lib/tv/engine";
 import { insertLog, updateLog, isDuplicate, applySignal } from "@/lib/tv/processor";
+import type { OptionContractInfo } from "@/services/trade-engine.server";
 // executeOnEngine (@/services/trade-engine.server) and the Telegram notifier
 // (@/lib/tv/notify) are lazy-imported inside after() so their heavy transitive
 // module graph (market-data provider layer) never loads on the cold-start path.
@@ -150,6 +151,9 @@ export async function POST(req: NextRequest) {
       // config-driven auto-trader owns execution (and writes the auto_trade_
       // decisions audit row). If not, fall back to the legacy env engine so
       // existing deployments keep working unchanged.
+      // The concrete option contract the engine opened (if any) — threaded into
+      // the Telegram alert so it can say exactly what to buy (side/strike/LTP).
+      let engineContract: OptionContractInfo | undefined;
       try {
         const { runAutoTrade } = await import("@/services/auto-trade.server");
         const auto = await runAutoTrade(admin, {
@@ -164,8 +168,12 @@ export async function POST(req: NextRequest) {
           if (engine && !engine.executed) {
             console.warn(`[tv-webhook] engine not executed: ${engine.detail}`);
           }
-        } else if (auto.status && auto.status !== "EXECUTED") {
-          console.warn(`[tv-webhook] auto-trade ${auto.status}: ${auto.detail}`);
+          engineContract = engine?.contract;
+        } else {
+          engineContract = auto.contract;
+          if (auto.status && auto.status !== "EXECUTED") {
+            console.warn(`[tv-webhook] auto-trade ${auto.status}: ${auto.detail}`);
+          }
         }
       } catch (e) {
         console.error(`[tv-webhook] engine error:`, (e as Error).message);
@@ -175,7 +183,7 @@ export async function POST(req: NextRequest) {
       if (actionable) {
         try {
           const { buildAlertText, sendTelegramAlert } = await import("@/lib/tv/notify");
-          await sendTelegramAlert(buildAlertText(payload, applied, actionLabel));
+          await sendTelegramAlert(buildAlertText(payload, applied, actionLabel, engineContract));
         } catch (e) {
           console.error(`[tv-webhook] notify error:`, (e as Error).message);
         }
